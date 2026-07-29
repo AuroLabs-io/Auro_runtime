@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=77.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auro-runtime"
+version = "0.1.0"
+description = "auro-runtime: a model-agnostic, policy-governed orchestration kernel"
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Chris Thurman" },
+]
+requires-python = ">=3.10"
+keywords = ["agents", "mcp", "orchestration", "policy", "runtime"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "pyyaml>=6.0",
+    "pydantic>=2.0",
+    "mcp>=1.0",
+    "requests>=2.28",
+]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.39"]
+keyring = ["keyring>=24.0"]
+dev = ["build>=1.2", "pytest>=7.0", "setuptools>=77.0"]
+
+[project.scripts]
+auro-runtime = "auro_runtime.__main__:main"
+
+[project.urls]
+Homepage = "https://aurolabs.io"
+
+[tool.setuptools.packages.find]
+include = ["auro_runtime*", "runtime_tools*"]
+
+[tool.setuptools.package-data]
+auro_runtime = [
+    "resources/directives/*.md",
+    "resources/policies/*.yaml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q --tb=short"
+markers = [
+    "slow: spawns subprocesses and drives full end-to-end runs",
+    "distribution: builds and probes an isolated wheel install (opt-in)",
+]

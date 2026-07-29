@@ -1,0 +1,40 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+build/
+dist/
+*.egg-info/
+.eggs/
+
+.venv/
+venv/
+env/
+ENV/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+htmlcov/
+.coverage
+
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+.auro_archive/
+.env
+auro_secrets.yaml
+.auro_secrets.yaml
+auro_audit.jsonl
+
+# Adversarial suites, withheld from publication (already named by
+# RESTRICTED_FILES in tests/catalogue.py). Kept locally so they run, never
+# committed: their payloads would double as an attack corpus. The canonical
+# copy lives outside this repo — `git clean -fdx` removes ignored files.
+tests/test_file_tools_safety.py
+tests/test_secret_scanning_evasions.py

@@ -1,0 +1,46 @@
+# Default policy — all rules here apply to every directive by default.
+id: default
+rules:
+  # Destructive and sensitive actions
+  - id: no_delete_without_confirm
+    description: Never emit a delete or overwrite tool call without explicit user confirmation.
+    guard: check_destructive_action
+    enforcement: warn
+    on_error: fail_open
+    tools: [delete_file, restore_file]
+  - id: confirm_destructive
+    description: Do not emit tool calls that delete, overwrite, or permanently modify data without explicit user confirmation in the request.
+  # Logging and audit
+  - id: log_actions
+    description: Every tool call must be loggable; prefer including a reason field.
+    guard: check_reason_not_empty
+    enforcement: warn
+    on_error: fail_open
+  # Execution safety
+  - id: no_arbitrary_code
+    description: Only invoke tools that are explicitly registered and listed in the active directive. Never execute, eval, or interpret user or external input as code.
+  - id: no_secrets_in_logs
+    description: Do not include secrets, API keys, passwords, or tokens in reason fields, summaries, or any logged output.
+    guard: check_no_secrets_in_args
+    enforcement: block
+    on_error: fail_closed
+  - id: least_privilege_tools
+    description: Use the minimum set of tools and arguments needed for the task. Prefer read-only tools when the goal can be achieved without writing.
+  - id: sensitive_paths
+    description: Be cautious with paths that suggest sensitive locations (e.g. .env, .credentials, .ssh, secrets). Prefer not to read or list such paths unless the user clearly requests it.
+    guard: check_sensitive_paths
+    enforcement: block
+    on_error: fail_closed
+    tools: [read_file, write_file, delete_file, list_dir, restore_file]
+  # Write volume and fan-out
+  - id: no_bulk_writes
+    description: Do not write to more than one distinct path in a single directive run without explicit user confirmation for each path.
+    guard: check_no_bulk_writes
+    enforcement: warn
+    on_error: fail_open
+    tools: [write_file]
+  - id: write_budget
+    description: Limit total write/delete/move operations per run to prevent runaway loops.
+    guard: check_write_budget
+    enforcement: block
+    on_error: fail_closed

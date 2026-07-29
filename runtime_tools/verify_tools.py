@@ -1,0 +1,771 @@
+"""
+Output quality gate tools: verify_code_static, verify_code_dynamic, verify_security.
+Static checks are safe (no code execution). Dynamic checks run in a temporary
+project copy with a sanitized environment.
+Each returns a structured report with passed (bool), checks (list), and errors/warnings.
+"""
+
+import ast
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+import yaml
+
+from auro_runtime.executor import register
+from auro_runtime.paths import get_source_checkout_root
+
+_PROJECT_ROOT = None
+
+# "tests" matters: verify_code_dynamic runs pytest inside the temporary copy.
+# "docs" matters because the copied suite validates its generated catalogue.
+# Without either directory, the dynamic phase cannot verify the real project.
+_SOURCE_DIRS = ["auro_runtime", "runtime_tools", "directives", "policies", "tests", "docs"]
+_SCAN_DIRS = [*_SOURCE_DIRS, ".github"]
+
+_SANITIZED_ENV_KEYS = {
+    "PATH", "SYSTEMROOT", "TEMP", "TMP", "COMSPEC",
+    "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+}
+
+# Set inside the verification sandbox so the dynamic verifier does not re-enter itself.
+_SANDBOX_MARKER = "AURO_VERIFY_SANDBOX"
+
+
+def _root() -> Path:
+    global _PROJECT_ROOT
+    if _PROJECT_ROOT is None:
+        _PROJECT_ROOT = get_source_checkout_root().resolve()
+    return _PROJECT_ROOT
+
+
+def _source_checkout_failure() -> dict | None:
+    """Return a structured refusal when a verifier has no source checkout."""
+    try:
+        _root()
+    except RuntimeError as exc:
+        finding = _make_finding(
+            SEVERITY_ERROR,
+            "SOURCE_CHECKOUT_REQUIRED",
+            str(exc),
+        )
+        result = _summarize([finding])
+        result["checks"] = [{
+            "name": "source_checkout",
+            "passed": False,
+            "detail": str(exc),
+        }]
+        return result
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Sandbox helper
+# ---------------------------------------------------------------------------
+
+class _Sandbox:
+    """
+    Copy source directories to a temp location for safe dynamic execution.
+    The real project root is never the cwd of a dynamic check.
+    """
+
+    def __init__(self):
+        self._tmpdir = None
+        self._path = None
+
+    def __enter__(self) -> Path:
+        self._tmpdir = tempfile.mkdtemp(prefix="auro_verify_")
+        sandbox = Path(self._tmpdir)
+
+        for src_dir in _SOURCE_DIRS:
+            src = _root() / src_dir
+            if src.exists():
+                shutil.copytree(src, sandbox / src_dir, dirs_exist_ok=True)
+
+        # Root files that make the sandbox a faithful snapshot of the project,
+        # not just enough to import it — tests may legitimately assert on them.
+        for config_file in ["pyproject.toml", "setup.py", "setup.cfg",
+                            "LICENSE", ".gitignore", "README.md"]:
+            src = _root() / config_file
+            if src.exists():
+                shutil.copy2(src, sandbox / config_file)
+
+        self._path = sandbox
+        return sandbox
+
+    def __exit__(self, *exc):
+        if self._tmpdir:
+            try:
+                shutil.rmtree(self._tmpdir, ignore_errors=True)
+            except Exception:
+                pass
+
+    def env(self) -> dict:
+        """Sanitized environment for subprocess execution."""
+        clean = {k: v for k, v in os.environ.items() if k in _SANITIZED_ENV_KEYS}
+        clean["PYTHONPATH"] = str(self._path)
+        clean["PYTHONDONTWRITEBYTECODE"] = "1"
+        clean["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+        # Recursion guard. The sandbox copies tests/, so a test that calls
+        # verify_code_dynamic would spawn a sandbox that runs that same test,
+        # nesting until the timeouts cascade. Inside the sandbox the dynamic
+        # verifier refuses to recurse.
+        clean[_SANDBOX_MARKER] = "1"
+        return clean
+
+
+SEVERITY_ERROR = "error"    # blocks promotion / merge / export
+SEVERITY_WARN = "warn"      # visible but allowed
+SEVERITY_INFO = "info"      # informational
+
+
+_PYTEST_SUMMARY_RE = re.compile(
+    r"^\s*=*\s*\d+\s+(passed|failed|error|skipped|xfailed|xpassed|deselected)",
+    re.IGNORECASE,
+)
+
+
+def _pytest_summary(stdout: str, tail: int = 400) -> str:
+    """
+    Lead the detail with pytest's own count line.
+
+    Truncating blindly to the tail can leave only progress bars, and a caller
+    handed dots and percentages will infer a test count rather than admit it
+    cannot see one. Surface the counts explicitly.
+    """
+    lines = [ln.strip() for ln in (stdout or "").strip().splitlines() if ln.strip()]
+    summary = next(
+        (ln for ln in reversed(lines) if _PYTEST_SUMMARY_RE.match(ln)),
+        None,
+    )
+    if summary:
+        return summary
+    if lines:
+        return f"[no pytest summary line found] {' '.join(lines)[-tail:]}"
+    return "[pytest produced no output]"
+
+
+_SCANNABLE_SUFFIXES = frozenset({
+    ".py", ".md", ".yaml", ".yml", ".toml", ".txt", ".json", ".cfg", ".ini", ".env", "",
+})
+_SCAN_SKIP_DIRS = frozenset({"__pycache__", ".git", ".pytest_cache", ".auro_archive", "node_modules"})
+
+
+def _iter_scannable_files():
+    """Every text file that ships, for whole-tree scans.
+
+    Deliberately not driven by `git diff`: a diff-scoped scan silently covers
+    nothing outside a git repo, on a clean tree, or in a fresh clone.
+    """
+    root = _root()
+    for src_dir in _SCAN_DIRS:
+        base = root / src_dir
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*")):
+            if not path.is_file():
+                continue
+            if any(part in _SCAN_SKIP_DIRS for part in path.parts):
+                continue
+            if path.suffix.lower() in _SCANNABLE_SUFFIXES:
+                yield path
+    for name in (
+        "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
+        "LICENSE",
+        "README.md",
+        "MANIFEST.in",
+        ".gitignore",
+    ):
+        p = root / name
+        if p.is_file():
+            yield p
+
+
+def _make_finding(severity: str, code: str, message: str, file: str = "", line: int = 0) -> dict:
+    finding = {"severity": severity, "code": code, "message": message}
+    if file:
+        finding["file"] = file
+    if line:
+        finding["line"] = line
+    return finding
+
+
+def _summarize(findings: list[dict]) -> dict:
+    """Return severity counts and pass/fail from a findings list."""
+    counts = {SEVERITY_ERROR: 0, SEVERITY_WARN: 0, SEVERITY_INFO: 0}
+    for f in findings:
+        sev = f.get("severity", SEVERITY_ERROR)
+        if sev in counts:
+            counts[sev] += 1
+    return {
+        "passed": counts[SEVERITY_ERROR] == 0,
+        "error_count": counts[SEVERITY_ERROR],
+        "warn_count": counts[SEVERITY_WARN],
+        "info_count": counts[SEVERITY_INFO],
+        "findings": findings,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Strict YAML loader — duplicate key detection
+# ---------------------------------------------------------------------------
+
+class _DuplicateKeyError(Exception):
+    def __init__(self, key, first_mark, second_mark):
+        self.key = key
+        self.first_mark = first_mark
+        self.second_mark = second_mark
+        super().__init__(f"Duplicate key '{key}' at line {second_mark.line + 1}")
+
+
+class _StrictSafeLoader(yaml.SafeLoader):
+    """SafeLoader that raises on duplicate keys instead of silently overwriting."""
+    pass
+
+
+def _strict_construct_mapping(loader, node, deep=False):
+    loader.flatten_mapping(node)
+    pairs = loader.construct_pairs(node, deep=deep)
+    seen = {}
+    for key, value in pairs:
+        if key in seen:
+            raise _DuplicateKeyError(key, seen[key], node.start_mark)
+        seen[key] = node.start_mark
+    return dict(pairs)
+
+
+_StrictSafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _strict_construct_mapping,
+)
+
+
+def _strict_yaml_load(text: str) -> dict:
+    """Parse YAML with duplicate key detection. Raises on duplicates."""
+    return yaml.load(text, Loader=_StrictSafeLoader)
+
+
+# ---------------------------------------------------------------------------
+# verify_code_static — safe, no code execution
+# ---------------------------------------------------------------------------
+
+@register(
+    "verify_code_static",
+    "Static code checks: syntax parsing, AST inspection, directive frontmatter parsing, "
+    "file layout validation. No code is executed — safe to run on untrusted input.",
+)
+def verify_code_static() -> dict:
+    if failure := _source_checkout_failure():
+        return failure
+
+    checks = []
+    errors = []
+    warnings = []
+
+    # 1. Syntax check on all project Python files
+    py_files = []
+    for src_dir in ["auro_runtime", "runtime_tools"]:
+        src_path = _root() / src_dir
+        if src_path.exists():
+            py_files.extend(src_path.rglob("*.py"))
+
+    syntax_errors = []
+    for pf in py_files:
+        rel = pf.relative_to(_root()).as_posix()
+        try:
+            raw = pf.read_bytes()
+            if raw.startswith(b"\xef\xbb\xbf"):
+                syntax_errors.append(_make_finding(
+                    "error",
+                    "SOURCE_BOM",
+                    "UTF-8 byte-order marks are not allowed in Python source",
+                    file=rel,
+                    line=1,
+                ))
+                continue
+            source = raw.decode("utf-8")
+            ast.parse(source, filename=rel)
+        except UnicodeDecodeError as e:
+            syntax_errors.append(_make_finding(
+                "error",
+                "SOURCE_ENCODING",
+                str(e),
+                file=rel,
+                line=1,
+            ))
+        except SyntaxError as e:
+            syntax_errors.append(_make_finding("error", "SYNTAX_ERROR", e.msg, file=rel, line=e.lineno or 0))
+
+    checks.append({
+        "name": "syntax_check",
+        "passed": len(syntax_errors) == 0,
+        "detail": f"{len(py_files)} Python files parsed" if not syntax_errors else syntax_errors,
+    })
+    if syntax_errors:
+        errors.extend(syntax_errors)
+
+    # 2. Directive frontmatter validation (YAML parse only, no imports)
+    directives_dir = _root() / "directives"
+    if directives_dir.exists():
+        bad_directives = []
+        directive_count = 0
+        for md_file in sorted(directives_dir.glob("*.md")):
+            directive_count += 1
+            try:
+                content = md_file.read_text(encoding="utf-8")
+                if not content.strip().startswith("---"):
+                    bad_directives.append(_make_finding(
+                        "error", "DIRECTIVE_NO_FRONTMATTER",
+                        "No YAML frontmatter", file=md_file.name,
+                    ))
+                    continue
+
+                parts = content.split("---", 2)
+                if len(parts) < 3:
+                    bad_directives.append(_make_finding(
+                        "error", "DIRECTIVE_BAD_FRONTMATTER",
+                        "Malformed frontmatter (no closing ---)", file=md_file.name,
+                    ))
+                    continue
+
+                try:
+                    meta = _strict_yaml_load(parts[1])
+                except _DuplicateKeyError as dke:
+                    bad_directives.append(_make_finding(
+                        "error", "DIRECTIVE_DUPLICATE_KEY",
+                        str(dke), file=md_file.name,
+                    ))
+                    continue
+                if not isinstance(meta, dict):
+                    bad_directives.append(_make_finding(
+                        "error", "DIRECTIVE_BAD_YAML",
+                        "Frontmatter is not a mapping", file=md_file.name,
+                    ))
+                    continue
+
+                if not meta.get("id"):
+                    bad_directives.append(_make_finding(
+                        "error", "DIRECTIVE_MISSING_ID",
+                        "Missing 'id' in frontmatter", file=md_file.name,
+                    ))
+                if not meta.get("tools"):
+                    warnings.append(_make_finding(
+                        "warn", "DIRECTIVE_NO_TOOLS",
+                        "No tools listed — directive will have no tool access", file=md_file.name,
+                    ))
+
+            except Exception as e:
+                bad_directives.append(_make_finding(
+                    "error", "DIRECTIVE_PARSE_ERROR",
+                    str(e), file=md_file.name,
+                ))
+
+        checks.append({
+            "name": "directive_validation",
+            "passed": len(bad_directives) == 0,
+            "detail": f"{directive_count} directives valid" if not bad_directives else bad_directives,
+        })
+        if bad_directives:
+            errors.extend(bad_directives)
+
+    # 3. Policy YAML parse check (no imports, just YAML structure)
+    policies_dir = _root() / "policies"
+    if policies_dir.exists():
+        bad_policies = []
+        policy_count = 0
+        for yaml_file in sorted(policies_dir.glob("*.yaml")):
+            policy_count += 1
+            try:
+                data = _strict_yaml_load(yaml_file.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    bad_policies.append(_make_finding(
+                        "error", "POLICY_BAD_YAML",
+                        "Policy file is not a mapping", file=yaml_file.name,
+                    ))
+                elif not data.get("id"):
+                    bad_policies.append(_make_finding(
+                        "warn", "POLICY_MISSING_ID",
+                        "Missing 'id' field", file=yaml_file.name,
+                    ))
+            except Exception as e:
+                bad_policies.append(_make_finding(
+                    "error", "POLICY_PARSE_ERROR",
+                    str(e), file=yaml_file.name,
+                ))
+
+        checks.append({
+            "name": "policy_yaml_parse",
+            "passed": len([p for p in bad_policies if p["severity"] == "error"]) == 0,
+            "detail": f"{policy_count} policy files valid" if not bad_policies else bad_policies,
+        })
+        errors.extend([p for p in bad_policies if p["severity"] == "error"])
+
+    # 4. File layout check
+    layout_issues = []
+    expected_dirs = {"auro_runtime", "runtime_tools", "directives", "policies"}
+    for d in expected_dirs:
+        if not (_root() / d).is_dir():
+            layout_issues.append(_make_finding(
+                "error", "MISSING_DIRECTORY",
+                f"Expected directory '{d}/' not found",
+            ))
+
+    if not (_root() / "runtime_tools" / "__init__.py").exists():
+        layout_issues.append(_make_finding(
+            "error", "MISSING_INIT",
+            "runtime_tools/__init__.py not found — tool registration will fail",
+        ))
+
+    checks.append({
+        "name": "file_layout",
+        "passed": len(layout_issues) == 0,
+        "detail": "All expected directories present" if not layout_issues else layout_issues,
+    })
+    if layout_issues:
+        errors.extend(layout_issues)
+
+    all_findings = errors + warnings
+    result = _summarize(all_findings)
+    result["checks"] = checks
+    return result
+
+
+# ---------------------------------------------------------------------------
+# verify_code_dynamic — executes code in a temporary project copy
+# ---------------------------------------------------------------------------
+
+@register(
+    "verify_code_dynamic",
+    "Dynamic code checks: tool imports, policy validation against registries, and test suite. "
+    "Runs in a temporary project copy with a sanitized environment. Never executes against the real project root.",
+)
+def verify_code_dynamic() -> dict:
+    if failure := _source_checkout_failure():
+        return failure
+
+    checks = []
+    errors = []
+    python = sys.executable
+
+    if os.environ.get(_SANDBOX_MARKER):
+        # Already inside a verification sandbox — see the guard in _Sandbox.env().
+        checks.append({
+            "name": "recursion_guard",
+            "passed": True,
+            "detail": "Already running inside a verification sandbox; dynamic checks not re-entered.",
+        })
+        result = _summarize(errors)
+        result["checks"] = checks
+        return result
+
+    with _Sandbox() as sandbox:
+        sandbox_env = _Sandbox()
+        sandbox_env._path = sandbox
+        env = sandbox_env.env()
+
+        # 1. Import check
+        try:
+            result = subprocess.run(
+                [python, "-c", "import runtime_tools; from auro_runtime.executor import list_tools; print(len(list_tools()))"],
+                capture_output=True, text=True, timeout=30,
+                cwd=str(sandbox),
+                env=env,
+            )
+            if result.returncode == 0:
+                count = result.stdout.strip()
+                checks.append({"name": "tool_imports", "passed": True, "detail": f"{count} tools registered"})
+            else:
+                checks.append({"name": "tool_imports", "passed": False, "detail": result.stderr[:500]})
+                errors.append(_make_finding("error", "IMPORT_FAILURE", result.stderr[:200]))
+        except subprocess.TimeoutExpired:
+            checks.append({"name": "tool_imports", "passed": False, "detail": "Import check timed out (30s)"})
+            errors.append(_make_finding("error", "IMPORT_TIMEOUT", "Import check timed out after 30s"))
+        except Exception as e:
+            checks.append({"name": "tool_imports", "passed": False, "detail": str(e)})
+            errors.append(_make_finding("error", "IMPORT_ERROR", str(e)))
+
+        # 2. Policy validation against registries
+        try:
+            result = subprocess.run(
+                [python, "-c", (
+                    "import runtime_tools; "
+                    "from auro_runtime.policy import load_policies, validate_policies; "
+                    "from auro_runtime.guards import get_guard_registry; "
+                    "from auro_runtime.executor import get_registry; "
+                    "policies = load_policies('policies'); "
+                    "validate_policies(policies, get_guard_registry(), get_registry()); "
+                    "print('OK')"
+                )],
+                capture_output=True, text=True, timeout=30,
+                cwd=str(sandbox),
+                env=env,
+            )
+            if result.returncode == 0 and "OK" in result.stdout:
+                checks.append({"name": "policy_validation", "passed": True, "detail": "All policies valid against registries"})
+            else:
+                checks.append({"name": "policy_validation", "passed": False, "detail": result.stderr[:500]})
+                errors.append(_make_finding("error", "POLICY_VALIDATION_FAILURE", result.stderr[:200]))
+        except subprocess.TimeoutExpired:
+            checks.append({"name": "policy_validation", "passed": False, "detail": "Policy validation timed out (30s)"})
+            errors.append(_make_finding("error", "POLICY_TIMEOUT", "Policy validation timed out after 30s"))
+        except Exception as e:
+            checks.append({"name": "policy_validation", "passed": False, "detail": str(e)})
+            errors.append(_make_finding("error", "POLICY_ERROR", str(e)))
+
+        # 3. Test suite
+        try:
+            result = subprocess.run(
+                # -o addopts= clears the target project's own addopts. Without it the
+                # project's config is inherited: a project that already sets -q gives
+                # pytest -q twice, and -qq suppresses the summary line entirely — leaving
+                # a caller with nothing but progress bars to infer a result from.
+                [python, "-m", "pytest", "-o", "addopts=", "--tb=short", "-q", "-p", "no:cacheprovider"],
+                capture_output=True, text=True, timeout=120,
+                cwd=str(sandbox),
+                env=env,
+            )
+            if "No module named pytest" in result.stderr:
+                detail = "pytest is not installed; the test suite did not run"
+                checks.append({"name": "test_suite", "passed": False, "detail": detail})
+                errors.append(_make_finding("error", "PYTEST_MISSING", detail))
+            elif result.returncode == 0:
+                checks.append({"name": "test_suite", "passed": True, "detail": _pytest_summary(result.stdout)})
+            elif result.returncode == 5:
+                detail = "No tests collected"
+                checks.append({"name": "test_suite", "passed": False, "detail": detail})
+                errors.append(_make_finding("error", "NO_TESTS_COLLECTED", detail))
+            else:
+                checks.append({"name": "test_suite", "passed": False, "detail": result.stdout.strip()[-500:]})
+                errors.append(_make_finding("error", "TEST_FAILURE", "Test suite failed"))
+        except subprocess.TimeoutExpired:
+            checks.append({"name": "test_suite", "passed": False, "detail": "Test suite timed out (120s)"})
+            errors.append(_make_finding("error", "TEST_TIMEOUT", "Test suite timed out after 120s"))
+        except Exception as e:
+            checks.append({"name": "test_suite", "passed": False, "detail": str(e)})
+
+    result = _summarize(errors)
+    result["checks"] = checks
+    return result
+
+
+# ---------------------------------------------------------------------------
+# verify_security
+# ---------------------------------------------------------------------------
+
+_SECRET_PATTERNS = [
+    ("github_pat", re.compile(r"ghp_[A-Za-z0-9]{36}")),
+    ("anthropic_key", re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}")),
+    ("openai_key", re.compile(r"sk-[A-Za-z0-9]{32,}")),
+    ("aws_key", re.compile(r"AKIA[A-Z0-9]{16}")),
+    ("jwt", re.compile(r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}")),
+    ("slack_token", re.compile(r"xox[bpas]-[A-Za-z0-9\-]{10,}")),
+    ("generic_key_assignment", re.compile(
+        r"(?:api[_-]?key|secret[_-]?key|auth[_-]?token|access[_-]?token)"
+        r"\s*[:=]\s*['\"][A-Za-z0-9_\-./+]{20,}['\"]",
+        re.IGNORECASE,
+    )),
+]
+
+_SENSITIVE_FILES = {".env", "auro_secrets.yaml", ".auro_secrets.yaml"}
+
+
+@register(
+    "verify_security",
+    "Security checks: secret scanning on modified files, guard validation, sensitive file exposure, "
+    "and tool schema coverage. Returns structured pass/fail report.",
+)
+def verify_security() -> dict:
+    if failure := _source_checkout_failure():
+        return failure
+
+    checks = []
+    errors = []
+
+    # 1. Secret scan over the whole shipped tree.
+    #
+    # This used to scan only `git diff --name-only HEAD`. That silently scans
+    # NOTHING in three common situations — not a git repo, a clean working
+    # tree, or a fresh clone — and then reports "0 files scanned clean" as a
+    # pass. A security check that proves nothing must not look like one that
+    # passed, so scan everything that ships and report the count.
+    try:
+        scanned_files = list(_iter_scannable_files())
+        secrets_found = []
+
+        for full_path in scanned_files:
+            try:
+                content = full_path.read_text(encoding="utf-8", errors="ignore")
+                for kind, pattern in _SECRET_PATTERNS:
+                    if pattern.search(content):
+                        secrets_found.append(_make_finding(
+                            "error", "SECRET_DETECTED",
+                            f"Possible {kind} detected",
+                            file=str(full_path.relative_to(_root())),
+                        ))
+            except Exception:
+                continue
+
+        if secrets_found:
+            checks.append({"name": "secret_scan", "passed": False, "detail": secrets_found})
+            errors.extend(secrets_found)
+        elif not scanned_files:
+            # Nothing scanned is not a clean result.
+            checks.append({
+                "name": "secret_scan",
+                "passed": False,
+                "detail": "No files were scanned — the secret scan verified nothing.",
+            })
+            errors.append(_make_finding(
+                SEVERITY_WARN, "SECRET_SCAN_EMPTY",
+                "Secret scan found no files to scan; this is not a clean result.",
+            ))
+        else:
+            checks.append({
+                "name": "secret_scan",
+                "passed": True,
+                "detail": f"{len(scanned_files)} files scanned clean",
+            })
+    except Exception as e:
+        checks.append({"name": "secret_scan", "passed": False, "detail": str(e)})
+
+    # 2. Sensitive files not staged
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True, text=True, timeout=15,
+            cwd=str(_root()),
+        )
+        staged_sensitive = []
+        for line in result.stdout.strip().splitlines():
+            if not line:
+                continue
+            status = line[:2]
+            filepath = line[3:].strip().strip('"')
+            filename = Path(filepath).name
+            if filename in _SENSITIVE_FILES and status[0] in ("A", "M"):
+                staged_sensitive.append(_make_finding(
+                    "error", "SENSITIVE_FILE_STAGED",
+                    f"Sensitive file staged for commit", file=filepath,
+                ))
+
+        if staged_sensitive:
+            checks.append({"name": "sensitive_files", "passed": False, "detail": staged_sensitive})
+            errors.extend(staged_sensitive)
+        else:
+            checks.append({"name": "sensitive_files", "passed": True, "detail": "No sensitive files staged"})
+    except Exception as e:
+        checks.append({"name": "sensitive_files", "passed": False, "detail": str(e)})
+
+    # 3. Guard registry completeness
+    try:
+        from auro_runtime.policy import load_policies, get_enforceable_rules
+        from auro_runtime.guards import get_guard_registry
+
+        policies = load_policies(_root() / "policies")
+        enforceable = get_enforceable_rules(policies)
+        guard_reg = get_guard_registry()
+        missing_guards = [r.id for r in enforceable if r.guard not in guard_reg]
+
+        if missing_guards:
+            checks.append({"name": "guard_completeness", "passed": False, "detail": missing_guards})
+            errors.append(_make_finding("error", "MISSING_GUARD", f"Missing guards: {missing_guards}"))
+        else:
+            checks.append({"name": "guard_completeness", "passed": True, "detail": f"{len(enforceable)} enforceable rules, all guards present"})
+    except Exception as e:
+        checks.append({"name": "guard_completeness", "passed": False, "detail": str(e)})
+
+    # 4. Tool schema coverage
+    try:
+        from auro_runtime.executor import get_registry
+        registry = get_registry()
+        no_schema = [name for name, (fn, doc, schema) in registry.items() if schema is None]
+
+        if no_schema:
+            checks.append({"name": "tool_schemas", "passed": True,
+                           "detail": f"{len(no_schema)} tools without schemas: {', '.join(sorted(no_schema))}"})
+        else:
+            checks.append({"name": "tool_schemas", "passed": True, "detail": f"All {len(registry)} tools have schemas"})
+    except Exception as e:
+        checks.append({"name": "tool_schemas", "passed": False, "detail": str(e)})
+
+    result = _summarize(errors)
+    result["checks"] = checks
+    return result
+
+
+# ---------------------------------------------------------------------------
+# verify_output — orchestrated gate with execution ordering
+# ---------------------------------------------------------------------------
+
+@register(
+    "verify_output",
+    "Run the full Output quality gate in the correct order: static checks first, "
+    "then security, then dynamic checks last. Short-circuits if static checks "
+    "produce errors — dynamic checks are skipped to avoid executing potentially broken code.",
+)
+def verify_output() -> dict:
+    """
+    Execution order:
+    1. verify_code_static  — syntax, frontmatter, layout (safe, fast)
+    2. verify_security     — secret scan, guard completeness (safe, reads files)
+    3. verify_code_dynamic — imports, policy validation, pytest (sandboxed, executes code)
+
+    If phases 1-2 produce errors, phase 3 is skipped.
+    """
+    if failure := _source_checkout_failure():
+        failure["phases"] = [{
+            "phase": "source_checkout",
+            "passed": False,
+            "error_count": failure["error_count"],
+            "warn_count": failure["warn_count"],
+            "checks": failure["checks"],
+        }]
+        return failure
+
+    phases = []
+    all_findings = []
+    static_errors = 0
+
+    # Phase 1: Static code checks
+    r = verify_code_static()
+    phases.append({"phase": "code_static", "passed": r["passed"], "error_count": r["error_count"],
+                   "warn_count": r["warn_count"], "checks": r.get("checks", [])})
+    all_findings.extend(r.get("findings", []))
+    static_errors += r["error_count"]
+
+    # Phase 2: Security
+    r = verify_security()
+    phases.append({"phase": "security", "passed": r["passed"], "error_count": r["error_count"],
+                   "warn_count": r["warn_count"], "checks": r.get("checks", [])})
+    all_findings.extend(r.get("findings", []))
+    static_errors += r["error_count"]
+
+    # Phase 3: Dynamic code checks — only if static phases are clean
+    if static_errors > 0:
+        phases.append({
+            "phase": "code_dynamic",
+            "passed": False,
+            "skipped": True,
+            "reason": f"Skipped — {static_errors} error(s) in static phases must be resolved first",
+        })
+        all_findings.append(_make_finding(
+            SEVERITY_WARN, "DYNAMIC_SKIPPED",
+            f"Dynamic checks skipped due to {static_errors} static error(s)",
+        ))
+    else:
+        r = verify_code_dynamic()
+        # Per-check detail remains part of the result so callers can report what
+        # the test phase covered, not just its pass/fail verdict.
+        phases.append({"phase": "code_dynamic", "passed": r["passed"], "error_count": r["error_count"],
+                       "warn_count": r["warn_count"], "checks": r.get("checks", [])})
+        all_findings.extend(r.get("findings", []))
+
+    result = _summarize(all_findings)
+    result["phases"] = phases
+    return result

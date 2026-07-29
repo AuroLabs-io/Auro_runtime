@@ -1,0 +1,21 @@
+# Normalize line endings so a checkout is byte-identical across platforms.
+# Development happens on Windows, production and CI on Linux; the distribution
+# tests compare packaged assets to source by content hash, and a line-ending
+# difference alone is enough to fail that comparison.
+* text=auto eol=lf
+
+# Content whose bytes are asserted on: policies and directives are hashed
+# against their packaged copies, and the verifier pins an encoding contract.
+*.py    text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.md    text eol=lf
+*.toml  text eol=lf
+*.in    text eol=lf
+
+LICENSE text eol=lf
+
+*.png binary
+*.jpg binary
+*.gz  binary
+*.whl binary
