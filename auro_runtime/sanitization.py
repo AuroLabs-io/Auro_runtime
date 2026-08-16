@@ -36,6 +36,28 @@ SENSITIVE_KEYS = frozenset(
         "key",
         "credential",
         "credentials",
+        # Header spellings. A guard that fires for an unrelated reason still has
+        # these in its arguments, and only the name-based pass runs for verdicts
+        # that carry no matched_fields.
+        "x-api-key",
+        "x-auth-token",
+        # Cloud identifiers. Excluded deliberately on 2026-08-03 as identifiers
+        # rather than secrets, on the reasoning that "when
+        # check_no_raw_credentials is what refuses the call, matched_fields
+        # covers them regardless". Added 2026-08-06 because that premise failed
+        # twice: matched_fields could not address a path inside a list, and the
+        # argument-validation refusal path runs BEFORE any guard, so on that
+        # path there are no matched_fields at all and this list is the only
+        # thing standing between a raw value and the audit log.
+        #
+        # The cost is real and was weighed: these read as [REDACTED] in audit
+        # records now. `redacted_fields` still records that the key was present,
+        # so provenance survives even though the value does not. The invariant
+        # in test_credentials.py is what keeps this set from drifting away from
+        # the guard's again.
+        "client_id",
+        "tenant_id",
+        "subscription_id",
     }
 )
 

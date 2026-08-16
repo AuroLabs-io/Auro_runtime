@@ -25,6 +25,7 @@ __all__ = [
     "ModelBackend",
     "get_backend",
     "generate",
+    "resolve_model",
     "reset_call_counts",
     "get_call_count",
     "increment_call_count",
@@ -64,6 +65,18 @@ def generate(
 ) -> str:
     """Generate via the configured backend. Convenience shim over get_backend()."""
     return get_backend().generate(system_prompt, user_message, model=model, max_tokens=max_tokens)
+
+
+def resolve_model(model: str | None = None) -> str:
+    """
+    The model id a `generate(model=...)` call would actually use.
+
+    Answers "what will this cost?" before committing to the call. Gates must
+    read this rather than the requested id — passing `model=None` is the normal
+    way to ask for the configured default, and a gate that only inspects the
+    argument sees nothing at all in exactly that case.
+    """
+    return get_backend().resolve_model(model)
 
 
 # --- Per-run model-call counter (owned here per F6; tools import it, never the reverse) ---

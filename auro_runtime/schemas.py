@@ -22,6 +22,9 @@ class AuditEvent(BaseModel):
     event_id: str = Field(default_factory=lambda: str(uuid4()))
     run_id: str | None = None
     sequence: int | None = None
+    # Zero-based, matching RunMessage.step_index, so an audit line joins to the
+    # transcript the run returns. None when no step owns the event.
+    step_index: int | None = None
     timestamp: str = Field(
         default_factory=lambda: datetime.now(tz=timezone.utc).isoformat()
     )

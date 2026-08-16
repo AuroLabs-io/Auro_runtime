@@ -9,12 +9,12 @@ import os
 import sys
 from pathlib import Path
 
-from auro_runtime.audit import write_audit_event
+from auro_runtime.audit import set_audit_step, write_audit_event
 from auro_runtime.directive import allowed_tools_for, list_directives, load_directive_by_id
-from auro_runtime.executor import execute, get_registry
+from auro_runtime.executor import UNRESTRICTED, execute, get_registry
 from auro_runtime.models import generate
 from auro_runtime.paths import get_directives_dir, get_policies_dir
-from auro_runtime.policy import load_policy, load_policies, format_policies_for_prompt, validate_policies, get_enforceable_rules
+from auro_runtime.policy import load_policy, load_policies, format_policies_for_prompt, validate_policies, get_enforceable_rules, shipped_posture_drift
 from auro_runtime.pipeline.contract import IntakeResult, Plan, PlanContext, RouterOutcome
 from auro_runtime.sanitization import (
     sanitize_fields_with_report,
@@ -105,21 +105,50 @@ def _policy_profile_error(policies) -> tuple[str, str | None]:
             "Use 'shipped' or explicitly select 'custom'."
         )
 
+    # What `shipped` promises: every reviewed rule is present and still does what
+    # was reviewed. Not that the set is exactly the reviewed set.
+    #
+    # Until 2026-08-09 any difference in either direction refused, so adding one
+    # rule cost an operator the whole check and pushed them onto `custom` — where
+    # they lose posture verification too. That is a bad trade to force for the
+    # safe direction: an added rule can only add a check, it cannot weaken one
+    # already there. Removals and edits still refuse, because both of those take
+    # enforcement away.
     actual_bindings = {binding.id for binding in policies}
     actual_rules = {rule.id for binding in policies for rule in binding.rules}
-    if actual_bindings == _SHIPPED_POLICY_BINDINGS and actual_rules == _SHIPPED_POLICY_RULES:
-        return profile, None
-
     missing_bindings = sorted(_SHIPPED_POLICY_BINDINGS - actual_bindings)
-    extra_bindings = sorted(actual_bindings - _SHIPPED_POLICY_BINDINGS)
     missing_rules = sorted(_SHIPPED_POLICY_RULES - actual_rules)
+    if missing_bindings or missing_rules:
+        return profile, (
+            "The shipped policy profile is incomplete. "
+            f"Missing bindings={missing_bindings}, missing rules={missing_rules}. "
+            f"Set {_POLICY_PROFILE_ENV}=custom only for a deliberately reviewed custom profile."
+        )
+
+    # Names alone prove nothing. Editing `enforcement: block` to `advisory`,
+    # swapping a `guard:`, or widening `tools:` leaves every id untouched while
+    # dropping the rule out of enforcement, and that is the edit that hides.
+    drift = shipped_posture_drift(policies)
+    if drift:
+        return profile, (
+            "The shipped policy profile has the reviewed rule names but not the "
+            "reviewed enforcement posture: "
+            + "; ".join(drift)
+            + f". Set {_POLICY_PROFILE_ENV}=custom only for a deliberately "
+            f"reviewed custom profile."
+        )
+
+    extra_bindings = sorted(actual_bindings - _SHIPPED_POLICY_BINDINGS)
     extra_rules = sorted(actual_rules - _SHIPPED_POLICY_RULES)
-    return profile, (
-        "The shipped policy profile is incomplete or has unreviewed additions. "
-        f"Missing bindings={missing_bindings}, extra bindings={extra_bindings}, "
-        f"missing rules={missing_rules}, extra rules={extra_rules}. "
-        f"Set {_POLICY_PROFILE_ENV}=custom only for a deliberately reviewed custom profile."
-    )
+    if extra_bindings or extra_rules:
+        # Permitted, and said out loud: the profile is no longer only the shipped
+        # set, and an operator reading the log should not have to diff to find out.
+        logger.info(
+            "shipped_policy_profile_extended: bindings=%s rules=%s",
+            extra_bindings,
+            extra_rules,
+        )
+    return profile, None
 
 
 def _add_to_path_if_needed(path: Path) -> None:
@@ -210,7 +239,7 @@ def _extract_json(text: str) -> dict | None:
 
 
 def _plan_from_directive_id(context: PlanContext, user_request: str) -> Plan | RouterOutcome:
-    """Build a Plan when directive_id (and optional override_directive) is set. Returns RouterOutcome if directive not allowed by role."""
+    """Build a Plan when directive_id (and optional override_directive) is set. Returns RouterOutcome if the directive is not in the server's exposed set."""
     _ensure_tools()
     user_request = _scrub(user_request)
     if context.override_directive is not None:
@@ -225,7 +254,7 @@ def _plan_from_directive_id(context: PlanContext, user_request: str) -> Plan | R
                     RunMessage(role="user", content=user_request, tool_call=None, tool_result=None, step_index=None, timestamp=None),
                     RunMessage(
                         role="assistant",
-                        content="This directive is not available to your role.",
+                        content="This directive is not in this server's exposed directive set.",
                         tool_call=None,
                         tool_result=None,
                         step_index=None,
@@ -233,7 +262,7 @@ def _plan_from_directive_id(context: PlanContext, user_request: str) -> Plan | R
                     ),
                 ],
                 final_summary=None,
-                error="This directive is not available to your role.",
+                error="This directive is not in this server's exposed directive set.",
                 meta={"event": "router_missing_directive", "directive_id": directive_id},
                 legacy_steps=[],
             )
@@ -579,7 +608,7 @@ def run(
 
     If override_directive is provided, use (metadata, body) instead of loading from directives_dir.
     If request_secrets is provided, resolve_secret will use it for this run only (cleared in finally).
-    If allowed_directive_ids is set, only that directive (if in set) can run (role-based governance).
+    If allowed_directive_ids is set, a directive runs only when its id is in that set — the server-wide MCP exposure list (deployment configuration), not a per-caller role.
 
     Returns a dict with the chat-style run schema: success, messages, final_summary, error, meta, legacy_steps.
     """
@@ -614,7 +643,7 @@ def route_and_run(
 
     Returns the same chat-style RunResult dict as run(), with routing messages
     prepended to the directive's own messages when a single directive is chosen.
-    If allowed_directive_ids is set, router only sees those directives (role-based governance).
+    If allowed_directive_ids is set, the router only sees directives in that set — the server-wide MCP exposure list (deployment configuration), not a per-caller role.
     """
     _ensure_tools()
     from auro_runtime.pipeline import run_pipeline
@@ -681,6 +710,35 @@ def _run_impl(
                 legacy_steps=[],
             ).model_dump()
     public_directive_id = _scrub(directive_id)
+
+    # A policies directory that is not there is a configuration error, not a
+    # decision to run without policies. load_policies() returns [] for both, so
+    # until this check the zero-rules gate below could not tell them apart: with
+    # AURO_ALLOW_NO_POLICIES set, a mistyped path became an unguarded run rather
+    # than a refusal. Checked before that gate and deliberately independent of
+    # it, because no value of the opt-out makes a missing path the intent.
+    if not Path(policies_dir).is_dir():
+        msg = _scrub(
+            f"Policies directory '{policies_dir}' does not exist. That is a "
+            f"configuration error rather than a request to run without policies, "
+            f"so {_ALLOW_NO_POLICIES_ENV} does not apply here. Check the path."
+        )
+        logger.error("policies_dir_missing: %s", msg)
+        write_audit_event(
+            "policies_dir_missing",
+            directive_id=directive_id,
+            error=msg,
+            policies_dir=str(policies_dir),
+        )
+        return RunResult(
+            success=False,
+            messages=[RunMessage(role="assistant", content=msg, tool_call=None, tool_result=None, step_index=None, timestamp=None)],
+            final_summary=None,
+            error=msg,
+            meta={"directive_id": public_directive_id, "event": "policies_dir_missing"},
+            legacy_steps=[],
+        ).model_dump()
+
     policies = load_policies(policies_dir)
     policy_text = format_policies_for_prompt(policies)
     allowed_tools = allowed_tools_for(meta)
@@ -803,6 +861,7 @@ Allowed tools for this directive: {', '.join(sorted(allowed_tools))}.
     user_message = user_request
 
     for step in range(max_steps):
+        set_audit_step(step)
         try:
             response_text = generate(
                 system_prompt=system_prompt,
@@ -820,7 +879,6 @@ Allowed tools for this directive: {', '.join(sorted(allowed_tools))}.
                 **sanitize_fields_with_report(
                     directive_id=directive_id,
                     error=e,
-                    step_index=step,
                 ),
             )
             messages.append(
@@ -1002,7 +1060,11 @@ Allowed tools for this directive: {', '.join(sorted(allowed_tools))}.
             tool_call,
             allowed_tools=allowed_tools,
             directive_id=directive_id,
-            policy_rules=enforceable_rules,
+            # An empty rule list now reads as an incomplete context rather than
+            # as "no guards apply". The unguarded opt-in was already made once,
+            # loudly, at the AURO_ALLOW_NO_POLICIES gate above; carry it down as
+            # an explicit sentinel instead of letting [] mean it silently.
+            policy_rules=UNRESTRICTED if unguarded_mode else enforceable_rules,
             run_history=steps,
         )
         safe_tool = _scrub(tool_call.tool)
@@ -1069,6 +1131,9 @@ Allowed tools for this directive: {', '.join(sorted(allowed_tools))}.
         len(steps),
         extra={"directive_id": public_directive_id, "max_steps": max_steps, "steps_count": len(steps)},
     )
+    # The loop is over, so no step owns this. Attribute it to max_steps, matching
+    # the RunMessage below, rather than leaving it on the last step that ran.
+    set_audit_step(max_steps)
     write_audit_event(
         "max_steps_reached",
         directive_id=directive_id,

@@ -8,6 +8,7 @@ an event reaches a collector or a file.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -20,6 +21,8 @@ from auro_runtime.paths import get_workspace_root
 from auro_runtime.sanitization import sanitize_with_report, scrub_text
 from auro_runtime.schemas import AuditEvent
 
+logger = logging.getLogger("auro_runtime.audit")
+
 _AUDIT_ENV = "AURO_AUDIT_LOG"
 _DEFAULT_FILENAME = "auro_audit.jsonl"
 _RESERVED_FIELDS = frozenset(
@@ -28,6 +31,7 @@ _RESERVED_FIELDS = frozenset(
         "event_id",
         "run_id",
         "sequence",
+        "step_index",
         "timestamp",
         "event",
         "redacted_fields",
@@ -39,6 +43,10 @@ _audit_collector: ContextVar[list[dict] | None] = ContextVar(
 )
 _audit_run_id: ContextVar[str | None] = ContextVar("audit_run_id", default=None)
 _audit_sequence: ContextVar[int] = ContextVar("audit_sequence", default=0)
+# Which orchestrator step the events being written belong to. Zero-based, to
+# match RunMessage.step_index so audit lines join to the returned transcript.
+# None when no step owns the event: outside a run, or on a direct execute().
+_audit_step: ContextVar[int | None] = ContextVar("audit_step", default=None)
 
 
 @dataclass(frozen=True)
@@ -48,6 +56,7 @@ class AuditRunContext:
     run_id: str
     run_token: Any
     sequence_token: Any
+    step_token: Any
 
 
 def begin_audit_run(run_id: str | None = None) -> AuditRunContext:
@@ -55,15 +64,18 @@ def begin_audit_run(run_id: str | None = None) -> AuditRunContext:
     resolved = run_id or str(uuid4())
     run_token = _audit_run_id.set(resolved)
     sequence_token = _audit_sequence.set(0)
+    step_token = _audit_step.set(None)
     return AuditRunContext(
         run_id=resolved,
         run_token=run_token,
         sequence_token=sequence_token,
+        step_token=step_token,
     )
 
 
 def end_audit_run(context: AuditRunContext) -> None:
     """Restore the audit context that existed before ``begin_audit_run``."""
+    _audit_step.reset(context.step_token)
     _audit_sequence.reset(context.sequence_token)
     _audit_run_id.reset(context.run_token)
 
@@ -71,6 +83,16 @@ def end_audit_run(context: AuditRunContext) -> None:
 def get_audit_run_id() -> str | None:
     """Return the active correlated run id, if this execution boundary set one."""
     return _audit_run_id.get()
+
+
+def set_audit_step(step: int | None) -> None:
+    """Attribute subsequent events to one orchestrator step. None clears it."""
+    _audit_step.set(step)
+
+
+def get_audit_step() -> int | None:
+    """Return the step events are currently attributed to, if any."""
+    return _audit_step.get()
 
 
 def set_audit_collector(collector: list[dict] | None) -> None:
@@ -136,6 +158,7 @@ def _normalize_audit_record(
             "event_id": str(uuid4()),
             "run_id": _audit_run_id.get(),
             "sequence": _next_sequence(),
+            "step_index": _audit_step.get(),
             "timestamp": _now(),
             "event": event,
             "redacted_fields": redacted_fields,
@@ -159,6 +182,13 @@ def _normalize_audit_record(
             existing_sequence
             if isinstance(existing_sequence, int) and existing_sequence >= 1
             else _next_sequence()
+        )
+        # step_index is zero-based, so 0 is a real value and the floor is >= 0.
+        existing_step = safe_record.get("step_index")
+        payload["step_index"] = (
+            existing_step
+            if isinstance(existing_step, int) and existing_step >= 0
+            else _audit_step.get()
         )
         payload["timestamp"] = (
             safe_record.get("timestamp")
@@ -192,25 +222,59 @@ def write_audit_event(event: str, **kwargs: object) -> None:
     try:
         with open(_audit_path(), "a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
-    except OSError:
-        pass
+    except OSError as exc:
+        # The sink stays best-effort: trouble writing the log must not interrupt
+        # the run being logged. Failing silently, though, left a lost record and
+        # a rejected one indistinguishable in the file -- both are just a gap in
+        # sequence. The record's own fields are not logged: it may carry context
+        # that is redacted but still sensitive, and the operator needs to know a
+        # write failed rather than what was in it.
+        logger.warning(
+            "audit_write_failed: event=%s run_id=%s error=%s",
+            record.get("event"),
+            record.get("run_id"),
+            scrub_text(str(exc)),
+        )
 
 
 def write_audit_records(records: list[dict]) -> list[str]:
     """Re-normalize and persist records; continue safely after bad entries."""
     path = _audit_path()
     errors: list[str] = []
+    written = 0
+    rejected = 0
     try:
         with open(path, "a", encoding="utf-8") as handle:
             for raw_record in records:
+                # Normalization and the write are separated deliberately. Folding
+                # them into one try treated a failed write as a malformed record,
+                # which conflates the two cases this log is supposed to keep
+                # apart: a record that was never valid, and one that was valid
+                # and is now lost. A write failure belongs to the OSError branch.
                 try:
                     record = _normalize_audit_record(
                         raw_record,
                         runtime_owned_envelope=False,
                     )
-                    handle.write(json.dumps(record) + "\n")
                 except Exception:
+                    rejected += 1
                     errors.append("audit record could not be safely persisted")
+                    continue
+                handle.write(json.dumps(record) + "\n")
+                written += 1
     except OSError as exc:
-        errors.append(scrub_text(str(exc)))
+        # This string reaches the caller through PersistResult and then the run
+        # result, so it must not carry the sink's path: scrub_text removes secret
+        # patterns, not filesystem layout. Full detail goes to the operator log.
+        lost = len(records) - written - rejected
+        logger.warning(
+            "audit_batch_write_failed: lost=%d of=%d path_error=%s",
+            lost,
+            len(records),
+            scrub_text(str(exc)),
+        )
+        errors.append(
+            f"audit sink unavailable ({type(exc).__name__}); "
+            f"{lost} of {len(records)} record(s) not persisted"
+        )
     return errors

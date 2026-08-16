@@ -18,12 +18,14 @@ the loader itself couldn't hide a binding problem from this suite.
 """
 
 import inspect
+import re
 from pathlib import Path
 
 import pytest
 import yaml
 
 from auro_runtime.guards import GuardVerdict
+from auro_runtime.policy import SHIPPED_ENFORCEMENT_POSTURE
 
 _EXPECTED_GUARD_NAMES = {
     "check_destructive_action",
@@ -98,39 +100,11 @@ class TestGuardPolicyBinding:
 #   enforcement - block refuses, warn audits and proceeds, advisory does neither
 #   on_error    - what happens when the guard itself raises
 #   tools       - which tools the rule applies to; None means every tool
-_SHIPPED_ENFORCEMENT = {
-    # policies/default.yaml
-    "no_delete_without_confirm": {
-        "guard": "check_destructive_action", "enforcement": "warn",
-        "on_error": "fail_open", "tools": ["delete_file", "restore_file"],
-    },
-    "log_actions": {
-        "guard": "check_reason_not_empty", "enforcement": "warn",
-        "on_error": "fail_open", "tools": None,
-    },
-    "no_secrets_in_logs": {
-        "guard": "check_no_secrets_in_args", "enforcement": "block",
-        "on_error": "fail_closed", "tools": None,
-    },
-    "sensitive_paths": {
-        "guard": "check_sensitive_paths", "enforcement": "block",
-        "on_error": "fail_closed",
-        "tools": ["read_file", "write_file", "delete_file", "list_dir", "restore_file"],
-    },
-    "no_bulk_writes": {
-        "guard": "check_no_bulk_writes", "enforcement": "warn",
-        "on_error": "fail_open", "tools": ["write_file"],
-    },
-    "write_budget": {
-        "guard": "check_write_budget", "enforcement": "block",
-        "on_error": "fail_closed", "tools": None,
-    },
-    # policies/credential_proxy.yaml
-    "no_hardcoded_secrets": {
-        "guard": "check_no_raw_credentials", "enforcement": "block",
-        "on_error": "fail_closed", "tools": ["http_request"],
-    },
-}
+# Imported rather than restated. This used to be a second copy of the same
+# posture, kept in step with the runtime by hand; since 2026-08-09 the runtime
+# checks the same values under AURO_POLICY_PROFILE=shipped, and two pins that
+# can disagree are worse than one, because each reports agreement with itself.
+_SHIPPED_ENFORCEMENT = SHIPPED_ENFORCEMENT_POSTURE
 
 
 class TestShippedPolicyEnforcementIsPinned:
@@ -178,6 +152,118 @@ class TestShippedPolicyEnforcementIsPinned:
             if r.enforcement == "block" and r.on_error != "fail_closed"
         ]
         assert offenders == [], f"blocking rules that do not fail closed: {offenders}"
+
+
+# --- The enforcement opt-out surface -------------------------------------
+
+# Every way a policy guard can be stopped from blocking a call, by environment.
+# The point of pinning this is not that any of them is wrong: each is deliberate,
+# fail-closed when unset, and unreachable by a model. The point is that the SET
+# can grow without anyone noticing, and it already grew past what the people who
+# built it carried in mind. A new AURO_* name in the enforcement path fails this
+# test until someone classifies it, the same way tests/catalogue.py refuses to
+# run for an unclassified test file.
+_ENFORCEMENT_ENV_OPT_OUTS = {
+    "AURO_ALLOW_NO_POLICIES": (
+        "Converts the zero-enforceable-rules refusal into an unguarded run, "
+        "which passes UNRESTRICTED down into execute()."
+    ),
+    "AURO_POLICY_PROFILE": (
+        "'custom' skips the check that the loaded bindings and rule ids match "
+        "the reviewed shipped set. Guards still run; they are no longer verified "
+        "to be the reviewed ones."
+    ),
+}
+
+# Modules that decide whether a guard runs. Read for AURO_* literals below.
+_ENFORCEMENT_PATH = (
+    "orchestrator.py",
+    "executor.py",
+    "policy.py",
+    "guards.py",
+    "directive.py",
+)
+
+_AURO_ENV_RE = re.compile(r"AURO_[A-Z_]+")
+
+
+class TestEnforcementOptOutSurfaceIsPinned:
+    """
+    The routes that disable enforcement, held to a known set.
+
+    Opened from the founder's reaction to the inventory on 2026-08-09 — "this is
+    a lot more bypass than I thought we had" — which is the argument for this
+    class. Each route is individually tested elsewhere; nothing failed when the
+    surface grew. See OT-enforcement-opt-outs-are-not-enumerated.
+    """
+
+    def test_enforcement_path_reads_only_the_pinned_environment_variables(self, repo_root):
+        found: dict[str, str] = {}
+        for name in _ENFORCEMENT_PATH:
+            path = repo_root / "auro_runtime" / name
+            for match in _AURO_ENV_RE.findall(path.read_text(encoding="utf-8")):
+                found.setdefault(match, name)
+
+        unpinned = {n: where for n, where in found.items() if n not in _ENFORCEMENT_ENV_OPT_OUTS}
+        assert unpinned == {}, (
+            f"unclassified AURO_* name(s) in the enforcement path: {unpinned}. "
+            f"If it can affect whether a guard runs, add it to "
+            f"_ENFORCEMENT_ENV_OPT_OUTS and document it in the README's Opting "
+            f"out section. If it cannot, it does not belong in these modules."
+        )
+
+    def test_pinned_opt_outs_are_still_read_where_claimed(self, repo_root):
+        """Negative control: a pin naming variables nothing reads proves nothing."""
+        source = "\n".join(
+            (repo_root / "auro_runtime" / name).read_text(encoding="utf-8")
+            for name in _ENFORCEMENT_PATH
+        )
+        for name in _ENFORCEMENT_ENV_OPT_OUTS:
+            assert name in source, (
+                f"{name} is pinned as an enforcement opt-out but no longer appears "
+                f"in the enforcement path. Remove it from the pin, and from the docs."
+            )
+
+    def test_only_advisory_drops_a_guarded_rule_from_enforcement(self):
+        """
+        `enforcement` is a free string, so the safe behaviour is that anything
+        unrecognised still enforces. A second non-blocking tier would be a new
+        opt-out, and this is what would notice it.
+        """
+        from auro_runtime.policy import get_enforceable_rules
+        from auro_runtime.schemas import PolicyBinding, PolicyRule
+
+        tiers = ("block", "warn", "advisory", "disabled", "off", "")
+        binding = PolicyBinding(
+            id="probe",
+            rules=[
+                PolicyRule(
+                    id=f"probe_{tier or 'empty'}",
+                    description=f"Synthetic probe for enforcement tier {tier!r}.",
+                    guard="check_reason_not_empty",
+                    enforcement=tier,
+                    enforcement_declared=True,
+                )
+                for tier in tiers
+            ],
+        )
+        dropped = {
+            rule.enforcement
+            for rule in binding.rules
+            if rule.id not in {r.id for r in get_enforceable_rules([binding])}
+        }
+        assert dropped == {"advisory"}, (
+            f"tiers dropped from enforcement changed: {sorted(dropped)}. "
+            f"Only 'advisory' should remove a guarded rule from evaluation."
+        )
+
+    def test_only_the_exact_fail_open_string_opts_out_of_failing_closed(self):
+        """A typo in on_error must not become a bypass."""
+        from auro_runtime.policy import _VALID_ON_ERROR
+
+        assert _VALID_ON_ERROR == {"fail_closed", "fail_open"}, (
+            "the on_error vocabulary changed; a third value is a new opt-out"
+        )
 
 
 # --- Guard callable contract ---------------------------------------------

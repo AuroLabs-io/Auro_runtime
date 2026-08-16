@@ -14,7 +14,7 @@ Layers exercised here, in the order execute() applies them:
 
 import pytest
 
-from auro_runtime.executor import execute
+from auro_runtime.executor import UNRESTRICTED, execute
 from auro_runtime.guards import GuardVerdict, get_guard_registry
 
 
@@ -22,14 +22,14 @@ from auro_runtime.guards import GuardVerdict, get_guard_registry
 
 
 def test_unknown_tool_is_refused(make_tool_call, registry, audit_events):
-    result = execute(make_tool_call("no_such_tool_xyz"))
+    result = execute(make_tool_call("no_such_tool_xyz"), allowed_tools=UNRESTRICTED, policy_rules=UNRESTRICTED, run_history=[])
     assert result.success is False
     assert "Unknown tool" in result.error
     assert any(e["event"] == "unknown_tool" for e in audit_events)
 
 
 def test_known_tool_with_no_restrictions_succeeds(make_tool_call, registry):
-    result = execute(make_tool_call("echo", {"message": "hello"}))
+    result = execute(make_tool_call("echo", {"message": "hello"}), allowed_tools=UNRESTRICTED, policy_rules=UNRESTRICTED, run_history=[])
     assert result.success is True
     assert result.error is None
 
@@ -39,19 +39,76 @@ def test_known_tool_with_no_restrictions_succeeds(make_tool_call, registry):
 
 def test_tool_outside_allowed_tools_is_refused(make_tool_call, registry, audit_events):
     result = execute(make_tool_call("write_file", {"path": "output/x.txt", "content": "x"}),
-                     allowed_tools={"echo", "list_dir"})
+                     allowed_tools={"echo", "list_dir"}, policy_rules=UNRESTRICTED, run_history=[])
     assert result.success is False
     assert "is not allowed by the current directive" in result.error
     assert any(e["event"] == "tool_not_allowed" for e in audit_events)
 
 
-def test_allowed_tools_none_means_unrestricted(make_tool_call, registry):
-    result = execute(make_tool_call("echo", {"message": "hi"}), allowed_tools=None)
+@pytest.mark.parametrize("omitted", ["allowed_tools", "policy_rules", "run_history"])
+def test_omitted_security_input_refuses(make_tool_call, registry, audit_events, omitted):
+    """
+    Omission must not select the permissive branch. execute() is public, so a
+    partially supplied context is the shape an embedding application reaches by
+    accident; each of the three inputs has to refuse on its own rather than
+    silently disabling its boundary.
+    """
+    ctx = {
+        "allowed_tools": {"echo"},
+        "policy_rules": UNRESTRICTED,
+        "run_history": [],
+    }
+    del ctx[omitted]
+
+    result = execute(make_tool_call("echo", {"message": "hi"}), **ctx)
+
+    assert result.success is False
+    assert omitted in result.error
+    assert "Incomplete execution context" in result.error
+    assert any(e["event"] == "incomplete_execution_context" for e in audit_events)
+
+
+def test_complete_context_proceeds(make_tool_call, registry):
+    """Positive control for the test above: the refusal is about the omission."""
+    result = execute(make_tool_call("echo", {"message": "hi"}),
+                     allowed_tools={"echo"}, policy_rules=UNRESTRICTED, run_history=[])
     assert result.success is True
 
 
+def test_unrestricted_is_the_only_way_past_a_boundary(make_tool_call, registry):
+    """
+    The permissive behaviour still exists; it just has to be named. Without this
+    the change above would be untestable as a *choice* rather than a removal.
+    """
+    result = execute(make_tool_call("echo", {"message": "hi"}),
+                     allowed_tools=UNRESTRICTED, policy_rules=UNRESTRICTED, run_history=[])
+    assert result.success is True
+
+
+def test_empty_policy_rules_is_not_a_way_to_run_unguarded(make_tool_call, registry):
+    """
+    An empty tool scope is a real answer (a directive declaring no tools may call
+    none), but an empty rule list means no guard runs at all, which is exactly
+    what omission meant. Only UNRESTRICTED may say that.
+    """
+    result = execute(make_tool_call("echo", {"message": "hi"}),
+                     allowed_tools={"echo"}, policy_rules=[], run_history=[])
+    assert result.success is False
+    assert "policy_rules" in result.error
+
+
+def test_empty_allowed_tools_is_a_real_answer_not_an_omission(make_tool_call, registry):
+    """The asymmetry above, from the other side: empty scope refuses the call
+    on scope grounds, not as an incomplete-context error."""
+    result = execute(make_tool_call("echo", {"message": "hi"}),
+                     allowed_tools=set(), policy_rules=UNRESTRICTED, run_history=[])
+    assert result.success is False
+    assert "Incomplete execution context" not in result.error
+    assert "is not allowed by the current directive" in result.error
+
+
 def test_tool_inside_allowed_tools_proceeds(make_tool_call, registry):
-    result = execute(make_tool_call("echo", {"message": "hi"}), allowed_tools={"echo"})
+    result = execute(make_tool_call("echo", {"message": "hi"}), allowed_tools={"echo"}, policy_rules=UNRESTRICTED, run_history=[])
     assert result.success is True
 
 
@@ -61,7 +118,7 @@ def test_tool_inside_allowed_tools_proceeds(make_tool_call, registry):
 def test_missing_required_argument_is_refused(make_tool_call, registry, audit_events):
     """write_file requires `content`; omitting it must fail cleanly, not crash."""
     result = execute(make_tool_call("write_file", {"path": "output/x.txt"}),
-                     allowed_tools={"write_file"})
+                     allowed_tools={"write_file"}, policy_rules=UNRESTRICTED, run_history=[])
     assert result.success is False
     assert "Invalid arguments" in result.error
     assert any(e["event"] == "argument_validation_failed" for e in audit_events)
@@ -69,7 +126,7 @@ def test_missing_required_argument_is_refused(make_tool_call, registry, audit_ev
 
 def test_wrong_typed_argument_is_refused(make_tool_call, registry):
     result = execute(make_tool_call("list_dir", {"path": ".", "recursive": "not-a-bool"}),
-                     allowed_tools={"list_dir"})
+                     allowed_tools={"list_dir"}, policy_rules=UNRESTRICTED, run_history=[])
     assert result.success is False
     assert "Invalid arguments" in result.error
 
@@ -81,7 +138,7 @@ def test_malformed_arguments_do_not_raise(make_tool_call, registry):
     crashed the whole process on any malformed tool call.
     """
     for bad in ({}, {"path": 123}, {"unexpected": ["a", "b"]}):
-        result = execute(make_tool_call("write_file", bad), allowed_tools={"write_file"})
+        result = execute(make_tool_call("write_file", bad), allowed_tools={"write_file"}, policy_rules=UNRESTRICTED, run_history=[])
         assert result.success is False, f"expected refusal for {bad}"
 
 
@@ -92,7 +149,7 @@ def test_block_rule_refuses_and_names_the_rule(make_tool_call, make_rule, regist
     rule = make_rule(guard="check_destructive_action", enforcement="block",
                      tools=["delete_file"], rule_id="test_block_delete")
     result = execute(make_tool_call("delete_file", {"path": "output/x.txt"}),
-                     allowed_tools={"delete_file"}, policy_rules=[rule])
+                     allowed_tools={"delete_file"}, policy_rules=[rule], run_history=[])
     assert result.success is False
     assert "Policy violation [test_block_delete]" in result.error
 
@@ -108,7 +165,7 @@ def test_warn_rule_records_the_verdict_but_proceeds(make_tool_call, make_rule, r
     rule = make_rule(guard="check_reason_not_empty", enforcement="warn",
                      on_error="fail_open", rule_id="test_warn_reason")
     call = make_tool_call("write_file", {"path": path, "content": "x"}, reason="")
-    result = execute(call, allowed_tools={"write_file"}, policy_rules=[rule])
+    result = execute(call, allowed_tools={"write_file"}, policy_rules=[rule], run_history=[])
 
     assert result.success is True, "warn must not block execution"
     checks = [e for e in audit_events if e["event"] == "policy_guard_check"]
@@ -121,7 +178,7 @@ def test_advisory_rule_does_not_block(make_tool_call, make_rule, registry):
     rule = make_rule(guard="check_destructive_action", enforcement="advisory",
                      tools=["delete_file"], on_error="fail_open")
     result = execute(make_tool_call("delete_file", {"path": "output/nonexistent.txt"}),
-                     allowed_tools={"delete_file"}, policy_rules=[rule])
+                     allowed_tools={"delete_file"}, policy_rules=[rule], run_history=[])
     assert result.success is True or "Policy violation" not in (result.error or "")
 
 
@@ -148,7 +205,7 @@ def test_rule_scoped_by_tools_does_not_fire_for_other_tools(make_tool_call, make
     # Out of scope: echo is not in the rule's tools, so the rule must be skipped
     # even though the empty reason would otherwise trip the guard.
     out_of_scope = execute(make_tool_call("echo", {"message": "hi"}, reason=""),
-                           allowed_tools={"echo"}, policy_rules=[rule])
+                           allowed_tools={"echo"}, policy_rules=[rule], run_history=[])
     assert out_of_scope.success is True, "a rule scoped to other tools must not block echo"
     assert not [e for e in audit_events if e["event"] == "policy_guard_check"]
 
@@ -156,7 +213,7 @@ def test_rule_scoped_by_tools_does_not_fire_for_other_tools(make_tool_call, make
     # the guard simply never fired, which is exactly how the old version failed.
     in_scope = execute(make_tool_call("write_file", {"path": "output/scoping_probe.txt",
                                                     "content": "x"}, reason=""),
-                       allowed_tools={"write_file"}, policy_rules=[rule])
+                       allowed_tools={"write_file"}, policy_rules=[rule], run_history=[])
     assert in_scope.success is False, "the same rule must block the tool it is scoped to"
     assert "Policy violation" in in_scope.error
 
@@ -168,26 +225,49 @@ def test_rule_scoped_by_directives_only_fires_for_matching_directive(make_tool_c
 
     other = execute(make_tool_call("delete_file", {"path": "output/x.txt"}),
                     allowed_tools={"delete_file"}, directive_id="a_different_one",
-                    policy_rules=[rule])
+                    policy_rules=[rule], run_history=[])
     assert "Policy violation" not in (other.error or "")
 
     matching = execute(make_tool_call("delete_file", {"path": "output/x.txt"}),
                        allowed_tools={"delete_file"}, directive_id="only_this_directive",
-                       policy_rules=[rule])
+                       policy_rules=[rule], run_history=[])
     assert matching.success is False
     assert "Policy violation" in matching.error
 
 
-def test_rule_naming_an_unregistered_guard_is_skipped(make_tool_call, make_rule, registry):
+def test_rule_naming_an_unregistered_guard_refuses(make_tool_call, make_rule, registry,
+                                                   audit_events):
     """
-    The executor silently continues past a guard name it cannot resolve, which is
-    why validate_policies() at load time is the only thing standing between a
-    typo and a silently absent protection. See test_policy_validation.py.
+    A rule was written to enforce something and names a guard that does not
+    exist. Skipping it silently made that indistinguishable from a guard that
+    approved. It is now treated as the guard failing: on_error decides, and the
+    condition is recorded either way.
+
+    Previously this asserted success is True, with validate_policies() at load
+    time as the only thing between a typo and an absent protection. That is
+    still the first line of defence; it is no longer the only one.
     """
     rule = make_rule(guard="check_guard_that_does_not_exist", enforcement="block")
     result = execute(make_tool_call("echo", {"message": "hi"}),
-                     allowed_tools={"echo"}, policy_rules=[rule])
+                     allowed_tools={"echo"}, policy_rules=[rule], run_history=[])
+    assert result.success is False
+    assert "is not registered" in result.error
+    assert any(e["event"] == "policy_guard_missing" for e in audit_events)
+
+
+def test_unregistered_guard_may_proceed_only_under_fail_open(make_tool_call, make_rule,
+                                                             registry, audit_events):
+    """
+    Negative control for the test above: the refusal follows on_error rather than
+    being unconditional, and the audit event is written on both branches so the
+    permissive path is never silent.
+    """
+    rule = make_rule(guard="check_guard_that_does_not_exist", enforcement="block",
+                     on_error="fail_open")
+    result = execute(make_tool_call("echo", {"message": "hi"}),
+                     allowed_tools={"echo"}, policy_rules=[rule], run_history=[])
     assert result.success is True
+    assert any(e["event"] == "policy_guard_missing" for e in audit_events)
 
 
 # --- Layer 2: directive scope is snapshotted, not re-read ---------------------
@@ -255,7 +335,7 @@ def test_guard_exception_fail_closed_refuses(make_tool_call, make_rule, registry
     rule = make_rule(guard=exploding_guard, enforcement="block", on_error="fail_closed",
                      rule_id="test_failclosed")
     result = execute(make_tool_call("echo", {"message": "hi"}),
-                     allowed_tools={"echo"}, policy_rules=[rule])
+                     allowed_tools={"echo"}, policy_rules=[rule], run_history=[])
     assert result.success is False
     assert "Policy guard error" in result.error
     assert any(e["event"] == "policy_guard_error" for e in audit_events)
@@ -266,7 +346,7 @@ def test_guard_exception_fail_open_proceeds(make_tool_call, make_rule, registry,
     rule = make_rule(guard=exploding_guard, enforcement="block", on_error="fail_open",
                      rule_id="test_failopen")
     result = execute(make_tool_call("echo", {"message": "hi"}),
-                     allowed_tools={"echo"}, policy_rules=[rule])
+                     allowed_tools={"echo"}, policy_rules=[rule], run_history=[])
     assert result.success is True
     assert any(e["event"] == "policy_guard_error" for e in audit_events)
 
@@ -288,7 +368,7 @@ def test_guard_exception_fails_closed_for_any_unrecognised_on_error(
     rule = make_rule(guard=exploding_guard, enforcement="block",
                      on_error=bad_on_error, rule_id="test_typo_on_error")
     result = execute(make_tool_call("echo", {"message": "hi"}),
-                     allowed_tools={"echo"}, policy_rules=[rule])
+                     allowed_tools={"echo"}, policy_rules=[rule], run_history=[])
     assert result.success is False, f"on_error={bad_on_error!r} must not fail open"
     assert "Policy guard error" in result.error
     assert any(e["event"] == "policy_guard_error" for e in audit_events)
@@ -358,7 +438,7 @@ def test_secret_guard_audit_redacts_the_value(make_tool_call, make_rule, registr
     secret = "sk-ant-" + "e" * 24
     rule = make_rule(guard="check_no_secrets_in_args", enforcement="block", rule_id="test_secrets")
     execute(make_tool_call("http_request", {"url": "https://x", "token": secret}),
-            allowed_tools={"http_request"}, policy_rules=[rule])
+            allowed_tools={"http_request"}, policy_rules=[rule], run_history=[])
     serialized = repr(audit_events)
     assert secret not in serialized, "raw secret leaked into the audit trail"
 
@@ -369,12 +449,189 @@ def test_secret_guard_audit_redacts_the_value(make_tool_call, make_rule, registr
 def test_real_policies_block_sensitive_path_reads(make_tool_call, enforceable_rules, registry):
     """End of the chain: the actual shipped rules refuse a secrets-file read."""
     result = execute(make_tool_call("read_file", {"path": "auro_secrets.yaml"}),
-                     allowed_tools={"read_file"}, policy_rules=enforceable_rules)
+                     allowed_tools={"read_file"}, policy_rules=enforceable_rules, run_history=[])
     assert result.success is False
     assert "sensitive_paths" in result.error
 
 
 def test_real_policies_allow_a_benign_call(make_tool_call, enforceable_rules, registry):
     result = execute(make_tool_call("echo", {"message": "hello"}, reason="a benign call"),
-                     allowed_tools={"echo"}, policy_rules=enforceable_rules)
+                     allowed_tools={"echo"}, policy_rules=enforceable_rules, run_history=[])
     assert result.success is True
+
+
+# --- Unknown arguments are refused, not dropped -------------------------------
+#
+# Pydantic's default is extra="ignore". Under it, `list_dir(path=...,
+# recurse=True)` ran non-recursively, returned success and raised nothing: the
+# call that reached the tool was not the call that was made, and nothing
+# downstream could tell. Every schema now inherits _ToolArgs, which forbids
+# extras.
+
+
+def test_an_unknown_argument_is_refused_rather_than_dropped(
+    make_tool_call, registry, tmp_path, monkeypatch
+):
+    """
+    The whole point is that the tool must not run. A misspelled flag that is
+    merely ignored produces a plausible wrong answer instead of an error.
+    """
+    result = execute(make_tool_call("list_dir", {"path": "output", "recurse": True}),
+                     allowed_tools={"list_dir"}, policy_rules=UNRESTRICTED, run_history=[])
+
+    assert result.success is False
+    assert result.result is None, "the tool ran despite an argument it did not accept"
+    assert "recurse" in result.error, (
+        f"the refusal must name the offending key so the model can correct it; got {result.error!r}"
+    )
+
+    # Control: the correctly spelled argument is accepted, so the assertion
+    # above is about the unknown key rather than about list_dir being broken.
+    ok = execute(make_tool_call("list_dir", {"path": "output", "recursive": True}),
+                 allowed_tools={"list_dir"}, policy_rules=UNRESTRICTED, run_history=[])
+    assert ok.success is True, ok.error
+
+
+def test_every_registered_tool_schema_forbids_unknown_arguments():
+    """
+    Stated over the registry rather than over a list of schemas, so a tool added
+    later with a hand-rolled BaseModel schema fails here instead of silently
+    reintroducing the permissive default.
+    """
+    from auro_runtime.executor import get_registry
+    from auro_runtime.orchestrator import _ensure_tools
+
+    _ensure_tools()
+    permissive = sorted(
+        name for name, (_fn, _doc, schema) in get_registry().items()
+        if schema is not None and schema.model_config.get("extra") != "forbid"
+    )
+    assert not permissive, (
+        f"{permissive} accept unknown argument keys and drop them silently"
+    )
+
+
+# --- A tool that refuses is not a successful call -----------------------------
+#
+# Tools signal domain failure by returning {"error": ...} rather than raising.
+# The executor only inspected exceptions, so a refused call came back as
+# success=True / error=None with the refusal readable only inside `result` —
+# and the orchestrator copies `success` straight into the run transcript, so a
+# blocked write was recorded as a step that worked.
+
+
+def test_a_tool_reporting_an_error_is_not_reported_as_success(
+    make_tool_call, registry, temp_output_file
+):
+    """End to end through a real refusal: write_file's own size cap."""
+    from runtime_tools import file_tools
+
+    rel = temp_output_file("output/__auro_successsemantics_probe__.txt")
+    oversized = "x" * (file_tools._WRITE_MAX_SIZE_BYTES + 1)
+
+    result = execute(make_tool_call("write_file", {"path": rel, "content": oversized}),
+                     allowed_tools={"write_file"}, policy_rules=UNRESTRICTED, run_history=[])
+
+    assert result.success is False, (
+        "a refused write was reported as a successful call"
+    )
+    assert result.error and "max write size" in result.error, (
+        "the tool's own message must reach ToolCallResult.error, not only result"
+    )
+    # The payload survives: it carries detail the bare message does not.
+    assert result.result["written"] is False
+
+
+def test_a_successful_tool_call_is_still_success(make_tool_call, registry):
+    """
+    Control. Without it, marking every call failed would satisfy the test above.
+    """
+    result = execute(make_tool_call("echo", {"message": "hello"}),
+                     allowed_tools={"echo"}, policy_rules=UNRESTRICTED, run_history=[])
+    assert result.success is True
+    assert result.error is None
+
+
+@pytest.mark.parametrize("payload", [None, ""])
+def test_a_falsy_error_key_is_not_a_failure(make_tool_call, payload):
+    """
+    `error: None` on a success path must not be read as a refusal, or a tool
+    that always includes the key for shape consistency could never succeed.
+    """
+    from auro_runtime.executor import _REGISTRY, register
+
+    name = "__probe_falsy_error__"
+    register(name, "probe")(lambda: {"ok": True, "error": payload})
+    try:
+        result = execute(make_tool_call(name, {}), allowed_tools={name},
+                         policy_rules=UNRESTRICTED, run_history=[])
+        assert result.success is True
+        assert result.error is None
+    finally:
+        _REGISTRY.pop(name, None)
+
+
+def test_a_nested_error_key_is_not_treated_as_a_refusal(make_tool_call):
+    """
+    Only a top-level `error` is the failure signal. A tool reporting errors as
+    *content* — a validator listing what it found — nests them, and must still
+    be able to succeed.
+    """
+    from auro_runtime.executor import _REGISTRY, register
+
+    name = "__probe_nested_error__"
+    register(name, "probe")(lambda: {"valid": False, "findings": {"error": "line 3 is bad"}})
+    try:
+        result = execute(make_tool_call(name, {}), allowed_tools={name},
+                         policy_rules=UNRESTRICTED, run_history=[])
+        assert result.success is True, (
+            "a nested error key was mistaken for a tool-level refusal"
+        )
+    finally:
+        _REGISTRY.pop(name, None)
+
+
+# --- Sensitive paths: the directory itself, not only files inside it ----------
+
+
+@pytest.mark.parametrize("path", [
+    ".ssh", ".ssh/", ".aws", ".aws/", ".gnupg", ".gnupg/",
+    "output/../.ssh",           # traversal reaching the bare directory
+    "home/.aws/credentials",    # the file form, which always worked
+])
+def test_sensitive_directories_are_blocked_in_bare_and_trailing_slash_forms(
+    path, make_tool_call, enforceable_rules, registry
+):
+    """
+    The directory patterns required a trailing separator, and
+    _canonicalize_path normalises through PurePosixPath, which strips one the
+    caller did supply. So `.ssh/id_rsa` was blocked while `.ssh/` and `.ssh`
+    were allowed, and list_dir would enumerate a credential directory.
+    """
+    result = execute(make_tool_call("list_dir", {"path": path}),
+                     allowed_tools={"list_dir"}, policy_rules=enforceable_rules,
+                     run_history=[])
+    assert result.success is False, f"{path!r} was allowed"
+    assert "sensitive_paths" in result.error
+
+
+@pytest.mark.parametrize("path", [
+    ".sshrc",            # a file whose name merely starts with .ssh
+    "my.ssh",            # .ssh not at a path boundary
+    ".awsome/notes.txt", # .aws is a prefix of this directory, not the directory
+    "output/notes.txt",
+])
+def test_the_sensitive_path_widening_does_not_over_block(
+    path, make_tool_call, enforceable_rules, registry, tmp_path
+):
+    """
+    Control for the test above. Alternating the trailing separator with `$`
+    must not turn the patterns into prefix matches — without this, blocking
+    everything would pass the parametrized case.
+    """
+    result = execute(make_tool_call("list_dir", {"path": path}),
+                     allowed_tools={"list_dir"}, policy_rules=enforceable_rules,
+                     run_history=[])
+    assert not (result.error and "sensitive_paths" in result.error), (
+        f"{path!r} is not a sensitive directory but was refused as one"
+    )

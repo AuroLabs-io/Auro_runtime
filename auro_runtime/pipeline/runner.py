@@ -96,7 +96,7 @@ def run_pipeline(
         verify_result = plugins.verify.verify(intake_result, plan, execute_result)
 
         # 5. Persist
-        plugins.persist.persist(
+        persist_result = plugins.persist.persist(
             intake_result,
             plan,
             execute_result,
@@ -124,6 +124,12 @@ def run_pipeline(
             result_dict["meta"] = {}
         result_dict["meta"]["audit_run_id"] = audit_context.run_id
         result_dict["meta"]["pipeline_verify_passed"] = verify_result.passed
+        # A run buffers its whole audit trail in memory and flushes once, here.
+        # If that flush fails the trail is gone, and until this was surfaced the
+        # caller had no way to know: the result looked identical either way.
+        result_dict["meta"]["audit_persisted"] = persist_result.persisted
+        if persist_result.errors:
+            result_dict["meta"]["audit_errors"] = persist_result.errors
         if plan.intro_message:
             result_dict["meta"]["routed_via"] = "natural_language"
             result_dict["meta"]["directive_id"] = plan.directive_id

@@ -404,43 +404,6 @@ def test_http_request_without_auth_alias_is_unchanged(registry, monkeypatch):
     assert not (captured["headers"] or {}).get("Authorization")
 
 
-# --- send_notification webhook_url_alias --------------------------------------
-
-
-def test_send_notification_resolves_the_url_alias(registry, monkeypatch):
-    """Slack and Discord webhook URLs contain the token, so the URL is the secret."""
-    from runtime_tools import notification_tools
-
-    secret_url = "https://hooks.slack.com/services/T000/B000/" + "x" * 24
-    monkeypatch.setenv("AURO_SECRET_SLACK_HOOK", secret_url)
-
-    captured = {}
-
-    class _Resp:
-        status_code = 200
-        text = "ok"
-
-    def fake_post(url, json=None, headers=None, timeout=None):
-        captured["url"] = url
-        return _Resp()
-
-    import requests
-
-    monkeypatch.setattr(requests, "post", fake_post)
-    result = notification_tools.send_notification(message="hi", webhook_url_alias="slack_hook")
-
-    assert captured["url"] == secret_url
-    assert secret_url not in repr(result), "resolved webhook URL must not appear in the result"
-
-
-def test_send_notification_requires_a_url_or_an_alias(registry):
-    from runtime_tools.notification_tools import send_notification
-
-    result = send_notification(message="hi")
-    assert result["sent"] is False
-    assert "webhook_url_alias" in result["error"]
-
-
 # --- The guard that enforces the convention -----------------------------------
 
 
@@ -478,7 +441,7 @@ def test_real_policy_refuses_a_raw_authorization_header(make_tool_call, enforcea
         "http_request",
         {"url": "https://example.com", "headers": {"Authorization": f"Bearer {SECRET_VALUE}"}},
     )
-    result = execute(call, allowed_tools={"http_request"}, policy_rules=enforceable_rules)
+    result = execute(call, allowed_tools={"http_request"}, policy_rules=enforceable_rules, run_history=[])
     assert result.success is False
     assert "raw" in result.error.lower() or "alias" in result.error.lower()
 
@@ -497,8 +460,198 @@ def test_alias_use_survives_the_real_policy_chain(env_secret, make_tool_call,
     monkeypatch.setattr(requests, "get", lambda url, headers=None, timeout=None: _Resp())
 
     call = make_tool_call("http_request", {"url": "https://example.com", "auth_alias": env_secret})
-    result = execute(call, allowed_tools={"http_request"}, policy_rules=enforceable_rules)
+    result = execute(call, allowed_tools={"http_request"}, policy_rules=enforceable_rules, run_history=[])
 
     assert result.success is True, result.error
     assert SECRET_VALUE not in repr(audit_events), "secret leaked into the audit trail"
     assert SECRET_VALUE not in repr(result)
+
+
+# --- Refusals must not log what they refused ---------------------------------
+#
+# The alias path above is the happy case. The dangerous one is the refusal: a
+# guard finds a raw credential, the call is blocked, and the audit record of the
+# block carries the credential. Redaction before that write has two inputs, and
+# only one of them is enough on its own.
+
+# Deliberately matches no SECRET_PATTERNS entry, and sits under a key that is
+# not in SENSITIVE_KEYS. Neither pass of the name-and-shape redaction can see
+# it, so it is redacted only if the guard says where it found it.
+BESPOKE_CREDENTIAL = "bespoke-" + "7" * 32
+
+
+def test_a_refused_raw_credential_is_not_logged_in_the_clear(
+    make_tool_call, enforceable_rules, registry, audit_events
+):
+    """
+    A refusal must not record what it refused.
+
+    Two independent mechanisms now cover this: the guard's
+    metadata["matched_fields"] addresses the exact field, and `client_id` is in
+    SENSITIVE_KEYS so the name-based pass catches it too. Before 2026-08-06 only
+    the first applied, and this test is written so it would fail if BOTH were
+    removed rather than proving either one individually — the targeted pass is
+    pinned separately by
+    test_targeted_redaction_reaches_a_key_the_name_pass_does_not.
+
+    Kept end-to-end deliberately: this is the test that caught the audit
+    disclosure opened by tightening the argument schemas.
+    """
+    call = make_tool_call(
+        "http_request",
+        {"url": "https://example.com", "client_id": BESPOKE_CREDENTIAL},
+    )
+    result = execute(call, allowed_tools={"http_request"},
+                     policy_rules=enforceable_rules, run_history=[])
+
+    assert result.success is False, "precondition: the call must be refused"
+    assert BESPOKE_CREDENTIAL not in repr(audit_events), (
+        "the refused credential reached the audit log in the clear"
+    )
+    # Positive control. Without this the test also passes when nothing is
+    # recorded at all, which would make the assertion above vacuous.
+    assert "example.com" in repr(audit_events), (
+        "arguments are not being recorded, so the absence above proves nothing"
+    )
+
+
+def test_credential_key_sets_do_not_diverge():
+    """
+    Every key the credential guard will refuse a call over must also be
+    redactable by name.
+
+    These two sets drifted apart once already: three cloud identifiers were in
+    the guard's set and not the sanitizer's, on the reasoning that the guard's
+    matched_fields would cover them. That reasoning held only where a guard
+    actually runs. It does not hold on the argument-validation refusal path,
+    which fires before any guard, and it did not hold for a field nested inside
+    a list. Both were live plaintext disclosures.
+
+    Stated as containment rather than equality: SENSITIVE_KEYS is allowed to be
+    broader (it carries `key`, `credential` and others the guard does not act
+    on). The direction that must never regress is a guard key with no name-based
+    cover.
+    """
+    from auro_runtime.guards import _RAW_CREDENTIAL_KEYS
+    from auro_runtime.sanitization import SENSITIVE_KEYS
+
+    uncovered = sorted(k for k in _RAW_CREDENTIAL_KEYS if k not in SENSITIVE_KEYS)
+    assert not uncovered, (
+        f"{uncovered} would be refused by check_no_raw_credentials but cannot be "
+        f"redacted by name. On any refusal path that runs before the guard, the "
+        f"value reaches the audit log in the clear."
+    )
+
+
+def test_a_pre_guard_refusal_does_not_log_a_credential(
+    make_tool_call, registry, audit_events
+):
+    """
+    Argument-schema validation refuses before any guard runs, and writes the
+    rejected args to the audit log. No verdict exists on that path, so no
+    matched_fields exist either — the name-based pass is the only cover.
+
+    Uses UNRESTRICTED so that no guard runs at all: if this passes, it passes
+    because the sanitizer covered the key, not because a guard rescued it.
+    """
+    from auro_runtime.executor import UNRESTRICTED
+
+    # `message` is required and absent, so validation fails for a reason that
+    # has nothing to do with the credential riding along beside it.
+    call = make_tool_call("echo", {"client_id": BESPOKE_CREDENTIAL})
+    result = execute(call, allowed_tools={"echo"},
+                     policy_rules=UNRESTRICTED, run_history=[])
+
+    assert result.success is False, "precondition: the call must be refused"
+    assert not any(e.get("event") == "policy_guard_check" for e in audit_events), (
+        "precondition: no guard may have run, or this proves nothing about the "
+        "pre-guard path"
+    )
+    assert BESPOKE_CREDENTIAL not in repr(audit_events), (
+        "a credential reached the audit log through the argument-validation "
+        "refusal path, which no guard covers"
+    )
+    # Positive control: the refusal IS being recorded, so the absence above is
+    # redaction rather than silence.
+    assert any(e.get("event") == "argument_validation_failed" for e in audit_events), (
+        "the refusal was not audited at all, so the assertion above is vacuous"
+    )
+
+
+def test_targeted_redaction_reaches_a_key_the_name_pass_does_not():
+    """
+    Pins the matched_fields pass on its own.
+
+    Once every guard key is also a sanitizer key, no end-to-end guard test can
+    isolate the targeted pass any more — the name pass would rescue it. So drive
+    redact_for_audit directly with a key that is deliberately outside
+    SENSITIVE_KEYS, where the field path is the only thing that can work.
+    """
+    from auro_runtime.guards import redact_for_audit
+    from auro_runtime.sanitization import SENSITIVE_KEYS
+
+    assert "project_ref" not in SENSITIVE_KEYS, "probe key must be uncovered by name"
+
+    out = redact_for_audit({"project_ref": BESPOKE_CREDENTIAL}, ["project_ref"])
+    assert BESPOKE_CREDENTIAL not in repr(out), (
+        "the targeted pass did not redact the field its input named"
+    )
+
+    # Control: without the matched_fields input the same value survives, so the
+    # assertion above is about the targeted pass and not about blanket scrubbing.
+    kept = redact_for_audit({"project_ref": BESPOKE_CREDENTIAL}, None)
+    assert BESPOKE_CREDENTIAL in repr(kept)
+
+
+def test_credential_header_spellings_are_redacted_by_name():
+    """
+    `x-api-key` and `x-auth-token` carry credentials and match no secret
+    pattern, so the name-based pass is the only thing that catches them when a
+    call is refused for an unrelated reason and the verdict supplies no
+    matched_fields.
+    """
+    from auro_runtime.sanitization import sanitize_value
+
+    scrubbed = sanitize_value(
+        {"headers": {"x-api-key": BESPOKE_CREDENTIAL, "x-auth-token": BESPOKE_CREDENTIAL}}
+    )
+    assert BESPOKE_CREDENTIAL not in repr(scrubbed)
+
+    # Control: an innocuous header keeps its value, so the assertion above is
+    # about these two names rather than about everything being scrubbed.
+    kept = sanitize_value({"headers": {"x-request-id": BESPOKE_CREDENTIAL}})
+    assert BESPOKE_CREDENTIAL in repr(kept)
+
+
+@pytest.mark.parametrize(
+    "guard_name, args",
+    [
+        ("check_no_raw_credentials",
+         {"url": "https://x", "client_id": BESPOKE_CREDENTIAL}),
+        ("check_no_secrets_in_args",
+         {"url": "https://x", "headers": {"Authorization": f"Bearer {SECRET_VALUE}"}}),
+    ],
+)
+def test_redacting_verdicts_carry_the_field_the_executor_reads(
+    guard_name, args, make_guard_context
+):
+    """
+    Pins the contract behind the test above. A verdict whose code is in
+    REDACTING_VERDICT_CODES triggers the targeted redaction pass, and
+    metadata["matched_fields"] is that pass's only input. A guard that finds a
+    secret and does not say where causes the executor to log it.
+
+    Parametrized over every guard that can emit one of those codes, so a third
+    code cannot join the set without a guard here failing to supply the key.
+    """
+    from auro_runtime.executor import REDACTING_VERDICT_CODES
+
+    guard = get_guard_registry()[guard_name]
+    verdict = guard(make_guard_context("http_request", args))
+
+    assert verdict is not None, f"precondition: {guard_name} must fire on this input"
+    assert verdict.code in REDACTING_VERDICT_CODES
+    assert verdict.metadata and verdict.metadata.get("matched_fields"), (
+        f"{guard_name} emits '{verdict.code}', which triggers targeted redaction, "
+        f"but supplies no matched_fields for it to act on"
+    )

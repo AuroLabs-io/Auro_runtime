@@ -14,6 +14,19 @@ from typing import Protocol, runtime_checkable
 class ModelBackend(Protocol):
     """A provider-neutral interface for single-turn text generation."""
 
+    def resolve_model(self, model: str | None = None) -> str:
+        """
+        Return the model id `generate(model=...)` would actually call.
+
+        Exists so a caller can find out *before* calling. Cost and policy gates
+        need the resolved id, not the requested one: `generate_text`'s
+        high-cost check read the caller's argument, so omitting `model`
+        skipped the gate entirely and the backend then substituted its
+        configured default afterwards — selecting the expensive model just
+        after the check that existed to guard against it.
+        """
+        ...
+
     def generate(
         self,
         system_prompt: str,

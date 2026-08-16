@@ -209,16 +209,25 @@ def check_no_secrets_in_args(ctx: GuardContext) -> GuardVerdict | None:
     return None
 
 
+# Directory patterns end with ([\\/]|$), not [\\/].
+#
+# Requiring a trailing separator meant these matched a file *inside* the
+# directory but not the directory itself, and `_canonicalize_path` normalises
+# through PurePosixPath, which strips a trailing separator the caller did
+# supply. So `.ssh/id_rsa` was blocked while `.ssh/`, `.ssh` and `.aws/` were
+# all allowed, and `list_dir` would happily enumerate them. Alternating with
+# `$` covers the bare form without loosening anything else: `.sshrc` still has
+# to fail, because a name merely starting with `.ssh` is not the directory.
 _SENSITIVE_PATH_PATTERNS = [
     re.compile(r"(^|[\\/])\.env(\..*)?$", re.IGNORECASE),
-    re.compile(r"(^|[\\/])\.ssh[\\/]", re.IGNORECASE),
+    re.compile(r"(^|[\\/])\.ssh([\\/]|$)", re.IGNORECASE),
     re.compile(r"(^|[\\/])id_rsa", re.IGNORECASE),
     re.compile(r"(^|[\\/])id_ed25519", re.IGNORECASE),
     re.compile(r"(^|[\\/])\.credentials", re.IGNORECASE),
     re.compile(r"(^|[\\/])auro_secrets\.yaml$", re.IGNORECASE),
     re.compile(r"(^|[\\/])\.auro_secrets\.yaml$", re.IGNORECASE),
-    re.compile(r"(^|[\\/])\.gnupg[\\/]", re.IGNORECASE),
-    re.compile(r"(^|[\\/])\.aws[\\/]", re.IGNORECASE),
+    re.compile(r"(^|[\\/])\.gnupg([\\/]|$)", re.IGNORECASE),
+    re.compile(r"(^|[\\/])\.aws([\\/]|$)", re.IGNORECASE),
     re.compile(r"(^|[\\/])credentials\.json$", re.IGNORECASE),
     re.compile(r"(^|[\\/])\.htpasswd$", re.IGNORECASE),
 ]
@@ -310,7 +319,12 @@ def check_no_raw_credentials(ctx: GuardContext) -> GuardVerdict | None:
                 f"at call time and never enters the transcript."
             ),
             code="raw_credential",
-            metadata={"key": key, "field": field_path},
+            # `matched_fields` is the contract the executor reads before writing
+            # the audit record (see REDACTING_VERDICT_CODES). `field` is kept as
+            # the human-readable single path; without `matched_fields` the
+            # targeted redaction is skipped and this guard's own finding lands
+            # in the log in the clear.
+            metadata={"key": key, "field": field_path, "matched_fields": [field_path]},
         )
     return None
 

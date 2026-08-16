@@ -81,8 +81,8 @@ def test_tool_catalog_happy_path_runs_to_completion(run_cli, registry):
 
     tool_names = {t["name"] for t in list_tools_step["result"]["tools"]}
     assert tool_names == set(registry.keys()), "list_tools must return the real registered registry"
-    assert len(tool_names) == 17, (
-        "Expected the full 17-tool built-in registry. If this changed intentionally, "
+    assert len(tool_names) == 12, (
+        "Expected the full 12-tool built-in registry. If this changed intentionally, "
         "update this count (and check whether it should have been gated by a directive)."
     )
 

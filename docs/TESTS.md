@@ -1,6 +1,6 @@
 # Test catalogue
 
-**216 test functions** across 10 files.
+**272 test functions** across 11 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -17,17 +17,18 @@ result in this repository depends on it.
 
 | File | Tests |
 |---|---:|
-| [`tests/test_policy_validation.py`](../tests/test_policy_validation.py) | 29 |
-| [`tests/test_guard_bindings.py`](../tests/test_guard_bindings.py) | 10 |
-| [`tests/test_enforcement.py`](../tests/test_enforcement.py) | 27 |
-| [`tests/test_credentials.py`](../tests/test_credentials.py) | 34 |
-| [`tests/test_registry.py`](../tests/test_registry.py) | 31 |
-| [`tests/test_directives.py`](../tests/test_directives.py) | 18 |
+| [`tests/test_policy_validation.py`](../tests/test_policy_validation.py) | 30 |
+| [`tests/test_guard_bindings.py`](../tests/test_guard_bindings.py) | 14 |
+| [`tests/test_enforcement.py`](../tests/test_enforcement.py) | 40 |
+| [`tests/test_credentials.py`](../tests/test_credentials.py) | 38 |
+| [`tests/test_registry.py`](../tests/test_registry.py) | 35 |
+| [`tests/test_directives.py`](../tests/test_directives.py) | 23 |
 | [`tests/test_end_to_end.py`](../tests/test_end_to_end.py) | 17 |
-| [`tests/test_security_p0.py`](../tests/test_security_p0.py) | 29 |
-| [`tests/test_audit_disclosure.py`](../tests/test_audit_disclosure.py) | 14 |
+| [`tests/test_security_p0.py`](../tests/test_security_p0.py) | 35 |
+| [`tests/test_audit_disclosure.py`](../tests/test_audit_disclosure.py) | 27 |
+| [`tests/test_archive_integrity.py`](../tests/test_archive_integrity.py) | 6 |
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 7 |
-| **Total** | **216** |
+| **Total** | **272** |
 
 ---
 
@@ -35,7 +36,7 @@ result in this repository depends on it.
 
 Policy loading and fail-hard validation. The regression barrier for the defect that once made the runtime unable to run any directive: a policy naming a tool that no longer exists.
 
-29 tests.
+30 tests.
 
 ### TestRealPoliciesLoadAndValidate
 
@@ -56,7 +57,8 @@ Policy loading and fail-hard validation. The regression barrier for the defect t
 - **raises when enforcing rule has no guard** — enforcement != 'advisory' with no guard is meaningless (nothing would
 - **raises on duplicate rule id within a binding**
 - **accumulates multiple errors into one exception** — validate_policies collects every problem before raising once, so a
-- **guard and tool checks are skipped when registries not passed** — validate_policies(policies) with no registry kwargs only checks
+- **omitting the registries checks against the live ones** — The registries used to default to None, which skipped the guard and tool
+- **explicit none still skips the registry checks** — Negative control, and a real use: validating a policy set before the
 ### TestGuardedRuleMustDeclareEnforcement
 
 - **guarded rule omitting enforcement is rejected**
@@ -81,7 +83,7 @@ Policy loading and fail-hard validation. The regression barrier for the defect t
 
 Every registered guard is bound by some policy rule, and every rule names a guard that exists. A registered-but-unbound guard reads as protection while never running.
 
-10 tests.
+14 tests.
 
 ### TestGuardRegistryShape
 
@@ -97,6 +99,12 @@ Every registered guard is bound by some policy rule, and every rule names a guar
 - **enforceable rule ids match the pinned set** — Catches a guard-bound rule being added or removed without a deliberate
 - **shipped rule posture is unchanged**
 - **every blocking rule fails closed** — Invariant rather than a pinned value: a rule that refuses calls must not
+### TestEnforcementOptOutSurfaceIsPinned
+
+- **enforcement path reads only the pinned environment variables**
+- **pinned opt outs are still read where claimed** — Negative control: a pin naming variables nothing reads proves nothing.
+- **only advisory drops a guarded rule from enforcement** — `enforcement` is a free string, so the safe behaviour is that anything
+- **only the exact fail open string opts out of failing closed** — A typo in on_error must not become a bypass.
 ### TestGuardCallableContract
 
 - **every guard is callable with exactly one required parameter** — Mirrors the signature check validate_policies() performs at load
@@ -108,12 +116,16 @@ Every registered guard is bound by some policy rule, and every rule names a guar
 
 The executor's refusal pipeline: registry check, directive scope, argument schema, then policy guards across block/warn/advisory and fail_closed/fail_open.
 
-27 tests.
+40 tests.
 
 - **unknown tool is refused**
 - **known tool with no restrictions succeeds**
 - **tool outside allowed tools is refused**
-- **allowed tools none means unrestricted**
+- **omitted security input refuses** — Omission must not select the permissive branch. execute() is public, so a
+- **complete context proceeds** — Positive control for the test above: the refusal is about the omission.
+- **unrestricted is the only way past a boundary** — The permissive behaviour still exists; it just has to be named. Without this
+- **empty policy rules is not a way to run unguarded** — An empty tool scope is a real answer (a directive declaring no tools may call
+- **empty allowed tools is a real answer not an omission** — The asymmetry above, from the other side: empty scope refuses the call
 - **tool inside allowed tools proceeds**
 - **missing required argument is refused** — write_file requires `content`; omitting it must fail cleanly, not crash.
 - **wrong typed argument is refused**
@@ -123,7 +135,8 @@ The executor's refusal pipeline: registry check, directive scope, argument schem
 - **advisory rule does not block**
 - **rule scoped by tools does not fire for other tools** — The guard used here must NOT filter by tool name itself, or the executor's
 - **rule scoped by directives only fires for matching directive**
-- **rule naming an unregistered guard is skipped** — The executor silently continues past a guard name it cannot resolve, which is
+- **rule naming an unregistered guard refuses** — A rule was written to enforce something and names a guard that does not
+- **unregistered guard may proceed only under fail open** — Negative control for the test above: the refusal follows on_error rather than
 - **directive is not re read during the step loop** — A run must not be able to widen its own authority.
 - **guard exception fail closed refuses**
 - **guard exception fail open proceeds**
@@ -137,6 +150,14 @@ The executor's refusal pipeline: registry check, directive scope, argument schem
 - **secret guard audit redacts the value** — A secret must never reach the audit log in plaintext.
 - **real policies block sensitive path reads** — End of the chain: the actual shipped rules refuse a secrets-file read.
 - **real policies allow a benign call**
+- **an unknown argument is refused rather than dropped** — The whole point is that the tool must not run. A misspelled flag that is
+- **every registered tool schema forbids unknown arguments** — Stated over the registry rather than over a list of schemas, so a tool added
+- **a tool reporting an error is not reported as success** — End to end through a real refusal: write_file's own size cap.
+- **a successful tool call is still success** — Control. Without it, marking every call failed would satisfy the test above.
+- **a falsy error key is not a failure** — `error: None` on a success path must not be read as a refusal, or a tool
+- **a nested error key is not treated as a refusal** — Only a top-level `error` is the failure signal. A tool reporting errors as
+- **sensitive directories are blocked in bare and trailing slash forms** — The directory patterns required a trailing separator, and
+- **the sensitive path widening does not over block** — Control for the test above. Alternating the trailing separator with `$`
 
 ---
 
@@ -144,7 +165,7 @@ The executor's refusal pipeline: registry check, directive scope, argument schem
 
 Alias resolution and delivery. The property under test throughout is that a resolved secret never appears in a tool result, an error message, or the audit trail.
 
-34 tests.
+38 tests.
 
 ### TestKeyringBackendRoundTrip
 
@@ -175,13 +196,17 @@ Alias resolution and delivery. The property under test throughout is that a reso
 - **http request rejects an unknown auth scheme**
 - **http request unconfigured alias names the alias not the value**
 - **http request without auth alias is unchanged**
-- **send notification resolves the url alias** — Slack and Discord webhook URLs contain the token, so the URL is the secret.
-- **send notification requires a url or an alias**
 - **guard blocks a raw token nested in headers** — The common shape of the mistake. Before alias params existed this guard
 - **guard allows the alias parameter**
 - **guard blocks a top level raw credential**
 - **real policy refuses a raw authorization header** — End of the chain: the shipped rules block it at enforcement level.
 - **alias use survives the real policy chain** — Using an alias must not be blocked, and must not leak into the audit.
+- **a refused raw credential is not logged in the clear** — A refusal must not record what it refused.
+- **credential key sets do not diverge** — Every key the credential guard will refuse a call over must also be
+- **a pre guard refusal does not log a credential** — Argument-schema validation refuses before any guard runs, and writes the
+- **targeted redaction reaches a key the name pass does not** — Pins the matched_fields pass on its own.
+- **credential header spellings are redacted by name** — `x-api-key` and `x-auth-token` carry credentials and match no secret
+- **redacting verdicts carry the field the executor reads** — Pins the contract behind the test above. A verdict whose code is in
 
 ---
 
@@ -189,11 +214,11 @@ Alias resolution and delivery. The property under test throughout is that a reso
 
 Tool registry shape, project-root and import wiring, the CLI surface, model-backend selection, and two source-hygiene invariants: loggers stay under the auro_runtime namespace, and no absolute home path reaches shipped source.
 
-31 tests.
+35 tests.
 
 ### TestToolRegistryShape
 
-- **exactly seventeen tools registered**
+- **exactly twelve tools registered**
 - **registered tool names match expected set**
 - **every registry entry is a three tuple**
 - **every tool callable is actually callable**
@@ -201,13 +226,13 @@ Tool registry shape, project-root and import wiring, the CLI surface, model-back
 - **each tool name is registered by exactly one register call** — The registry is a plain dict keyed by name: a second, unrelated
 ### TestToolSchemas
 
-- **expected schema map plus verify tools covers every tool name** — Sanity-check the two constants above against each other before trusting either.
+- **expected schema map covers every tool name** — Sanity-check the two constants above against each other before trusting either.
 - **schemas present are pydantic basemodel subclasses**
-- **exactly the four verify tools have no schema**
+- **every registered tool has an argument schema** — No exemptions since 2026-08-13. A registered tool takes model-supplied
 - **each tool is wired to its expected schema class**
 ### TestListToolsTool
 
-- **returns all seventeen with descriptions**
+- **returns all twelve with descriptions**
 - **include args true adds an args summary per tool**
 - **include args false omits the args summary**
 - **runs cleanly through the real executor** — Exercises the schema-validation + dispatch path in executor.execute, not just the bare function.
@@ -231,6 +256,12 @@ Tool registry shape, project-root and import wiring, the CLI surface, model-back
 - **default backend is anthropic**
 - **openai and openai compatible are aliases for the same backend**
 - **unknown backend name raises value error**
+- **resolve model reports the id generate would actually call** — The cost gate needs the resolved id. Without this, `model=None` — the
+### TestHighCostModelGate
+
+- **the gate fires when the expensive model comes from the default**
+- **a cheap default is not gated** — Control. Without it, a gate that stopped every call would satisfy the
+- **no high cost list means no gate** — AURO_HIGH_COST_MODELS is empty by default, so the gate is inert.
 - **get backend works even when provider sdks are unimportable** — Simulates neither the anthropic nor the openai SDK being installed by
 - **importing models package does not import provider sdks** — A clean-interpreter check (subprocess, not the sys.modules trick
 ### TestModelCallCounter
@@ -245,7 +276,7 @@ Tool registry shape, project-root and import wiring, the CLI surface, model-back
 
 Shipped directive integrity. A directive naming a tool that no longer exists parses fine, ships fine, and fails only at execution.
 
-18 tests.
+23 tests.
 
 ### TestEmptyToolScopeFailsClosed
 
@@ -262,11 +293,16 @@ Shipped directive integrity. A directive naming a tool that no longer exists par
 - **no directive references pre rename paths** — The carve renamed auro/ -> auro_runtime/ and tools/ -> runtime_tools/. Stale
 - **list directives returns every file**
 - **validate directive passes for every shipped directive** — Run the project's own validator over its own content.
-- **verify project covers the whole gate** — verify_project exists to exercise the verify_* tools nothing else invoked.
+- **verifiers are not reachable from a directive** — The verifiers are operator functions and must stay unregistered.
 - **dynamic verifier fails when test phase is vacuous** — A missing runner or empty collection must never make the gate green.
 - **dynamic verifier copies test catalogue** — The temporary project must contain the generated file its tests validate.
 - **test coverage audit writes only to a writable dir**
 - **verification directives are registered in the set**
+- **directive catalogue is current** — docs/DIRECTIVES.md is generated from directives/. A hand-maintained
+- **directive catalogue would detect an added directive** — Negative control for the test above. A drift check that cannot fail proves
+- **directive catalogue refuses an undescribed directive** — A directive grants tool authority. Generation must halt on one it cannot
+- **readme directive count matches the shipped set** — The README states how many directives ship. Nothing generates that sentence,
+- **readme directive count guard would catch a stale number** — Negative control. A guard that passes on any input proves nothing, so this
 
 ---
 
@@ -302,10 +338,16 @@ Full runs through the real CLI against a stub model server. Only inference is st
 
 Regression tests for the package-owned authority split: zero-policy refusal, workspace resolution, protected-path writes, directive exposure sets, MCP startup enforcement, and the static verifier's source-checkout and encoding contracts. Every case proves a seam that is closed in shipped code.
 
-29 tests.
+35 tests.
 
 - **zero policy gate rejects every non explicit opt in** — Only the exact documented value ``1`` may disable every policy guard.
 - **zero policy gate allows exact explicit opt in** — Positive control: the documented escape hatch remains usable.
+- **a missing policies directory is refused even with the opt in set** — The compound case: AURO_ALLOW_NO_POLICIES=1 left in an environment, plus a
+- **an existing empty policies directory still honours the opt in** — Negative control for the test above. The missing-directory refusal must not
+- **a downgraded shipped rule is refused at runtime** — The edit that hides: `block` to `advisory` keeps the rule id, so the profile
+- **an intact shipped profile still passes** — Negative control. Without this, the test above only proves the copied policy
+- **an added rule does not cost the shipped profile check** — An addition can only add a check, so it must not force an operator onto
+- **a removed rule still refuses under the shipped profile** — Control for the test above, in the direction that matters: permitting
 - **partial shipped policy profile is refused** — One surviving rule must not masquerade as the complete shipped posture.
 - **explicit custom policy profile is not compared to shipped manifest** — Positive control: deliberate custom policy sets remain supported.
 - **project root does not trust an arbitrary working directory** — A CWD marker must not redirect policies, directives, or Python imports.
@@ -340,9 +382,22 @@ Regression tests for the package-owned authority split: zero-policy refusal, wor
 
 Public contracts for the versioned audit envelope and the shared sanitizer used at audit, executor, transcript, router, model-context, and logging boundaries. Uses only an ordinary synthetic marker; scanner-evasion probes remain in the restricted suite.
 
-14 tests.
+27 tests.
 
 - **audit envelope is correlated idempotent and scrubbed** — The live collector and persisted JSONL retain one safe event identity.
+- **file events audit relative paths that correlate** — The audit trail names a file the same way each time, and never absolutely.
+- **a failed batch write is reported and names no path** — Losing the trail must be visible to the caller, without leaking the sink's path.
+- **a rejected record is not counted as a lost one** — A record that was never valid is a different failure from one that is gone.
+- **a swallowed single write failure reaches the operator log** — write_audit_event stays best-effort, but no longer fails invisibly.
+- **a run whose audit trail was lost says so in its result** — The reporting is only worth building if the caller actually receives it.
+- **a healthy run reports its audit trail persisted** — Negative control: audit_persisted must not be False for everyone.
+- **soft delete and permanent prune are distinct events** — The recoverable move and the irreversible unlink must not look alike in the log.
+- **a prune that destroys nothing writes nothing** — Negative control: the event must mean destruction, not that prune ran.
+- **audit event catalogue is current** — docs/AUDIT_EVENTS.md is generated from the write_audit_event call sites.
+- **audit catalogue would detect a renamed event** — Negative control. A drift check that cannot fail proves nothing, and the
+- **audit catalogue refuses a non literal event name** — An event name assembled at runtime cannot be documented, grouped on, or
+- **step index attributes events and survives persistence** — An event carries the step that owns it, and keeps it when flushed to file.
+- **step index does not leak across runs** — A run that ends restores the step its caller was on, including None.
 - **bulk audit sink scrubs legacy records independently** — Persist is a security boundary even when a caller bypasses event creation.
 - **nested audit runs restore outer correlation** — A nested run gets its own sequence without contaminating its caller.
 - **plan stage audit uses the pipeline run id** — Early Plan failures correlate with the result even before Execute collects.
@@ -356,6 +411,27 @@ Public contracts for the versioned audit envelope and the shared sanitizer used 
 - **router reason and backend exception are safe** — Pre-tool router and backend failures use the same outbound scrub contract.
 - **mcp errors use the same safe outbound contract** — MCP refusal and exception responses cannot bypass the runtime scrub.
 - **cli json and audit are safe** — The real CLI serialization and persisted JSONL share the scrub contract.
+
+---
+
+## `tests/test_archive_integrity.py`
+
+Soft delete keeps its promise: an archived file is never destroyed by a later one. Archive names carry the directory so same-named files cannot share an entry, an existing entry is never overwritten, restore refuses a name it cannot resolve to one original, and the retention caps govern the write path as well as the delete path.
+
+6 tests.
+
+### TestArchiveNameCollisions
+
+- **same basename in different directories both stay recoverable** — Two same-named files deleted in one second each restore with their own content.
+- **redeleting one path in the same second keeps both versions** — A path deleted, recreated and deleted again within a second archives twice.
+- **archive name records the directory not only the basename** — The archive name carries the file's directory, which is what made names unique.
+### TestRestoreAmbiguity
+
+- **restore refuses an archive name mapping to two originals** — One archive name naming two different files is refused, not silently chosen.
+- **repeated rows for one original are not ambiguous** — Many manifest rows naming the same original still resolve and restore.
+### TestArchiveRetention
+
+- **overwriting a file prunes stale archive entries** — The age cap governs the write path too, not only delete_file.
 
 ---
 

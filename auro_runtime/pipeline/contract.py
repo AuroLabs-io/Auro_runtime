@@ -82,7 +82,7 @@ class PlanContext(BaseModel):
     )
     allowed_directive_ids: set[str] | None = Field(
         default=None,
-        description="If set, only these directive ids are visible (role-based governance). None = all.",
+        description="If set, only these directive ids are visible — the server-wide MCP exposure set (deployment configuration), not a per-caller role. None = all.",
     )
 
     model_config = {"arbitrary_types_allowed": True}

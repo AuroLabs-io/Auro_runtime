@@ -23,6 +23,10 @@ DEFAULT_TIMEOUT_SECONDS = 120
 class OpenAICompatibleBackend(ModelBackend):
     """ModelBackend implementation calling an OpenAI-compatible /v1/chat/completions endpoint."""
 
+    def resolve_model(self, model: str | None = None) -> str:
+        """The model id generate() will call. Single source of truth for it."""
+        return model or os.environ.get("AURO_OPENAI_MODEL", DEFAULT_MODEL)
+
     def generate(
         self,
         system_prompt: str,
@@ -41,7 +45,7 @@ class OpenAICompatibleBackend(ModelBackend):
         """
         base_url = os.environ.get("AURO_OPENAI_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
         api_key = os.environ.get("AURO_OPENAI_API_KEY")
-        resolved_model = model or os.environ.get("AURO_OPENAI_MODEL", DEFAULT_MODEL)
+        resolved_model = self.resolve_model(model)
 
         headers = {"Content-Type": "application/json"}
         if api_key and api_key.strip():

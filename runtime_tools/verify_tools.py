@@ -1,5 +1,15 @@
 """
-Output quality gate tools: verify_code_static, verify_code_dynamic, verify_security.
+Source-checkout verification: verify_code_static, verify_code_dynamic,
+verify_security, and verify_output over the three of them.
+
+These are operator functions, called directly, and are deliberately NOT
+registered as tools. They were reachable by a model through the `verify_project`
+directive until 2026-08-13. That path was cut because it inverted when it worked:
+driving it requires the registries to load, the policies to validate, and a model
+to follow a multi-step protocol, so the runs it could report on were the runs
+that were already fine. A broken checkout refused the directive instead of
+explaining itself. Called directly, these still run and still report.
+
 Static checks are safe (no code execution). Dynamic checks run in a temporary
 project copy with a sanitized environment.
 Each returns a structured report with passed (bool), checks (list), and errors/warnings.
@@ -16,7 +26,6 @@ from pathlib import Path
 
 import yaml
 
-from auro_runtime.executor import register
 from auro_runtime.paths import get_source_checkout_root
 
 _PROJECT_ROOT = None
@@ -255,12 +264,12 @@ def _strict_yaml_load(text: str) -> dict:
 # verify_code_static — safe, no code execution
 # ---------------------------------------------------------------------------
 
-@register(
-    "verify_code_static",
-    "Static code checks: syntax parsing, AST inspection, directive frontmatter parsing, "
-    "file layout validation. No code is executed — safe to run on untrusted input.",
-)
 def verify_code_static() -> dict:
+    """
+    Static code checks: syntax parsing, AST inspection, directive frontmatter
+    parsing, file layout validation. No code is executed, so this is safe to run
+    on untrusted input.
+    """
     if failure := _source_checkout_failure():
         return failure
 
@@ -440,12 +449,12 @@ def verify_code_static() -> dict:
 # verify_code_dynamic — executes code in a temporary project copy
 # ---------------------------------------------------------------------------
 
-@register(
-    "verify_code_dynamic",
-    "Dynamic code checks: tool imports, policy validation against registries, and test suite. "
-    "Runs in a temporary project copy with a sanitized environment. Never executes against the real project root.",
-)
 def verify_code_dynamic() -> dict:
+    """
+    Dynamic code checks: tool imports, policy validation against the registries,
+    and the test suite. Runs in a temporary project copy with a sanitized
+    environment. Never executes against the real project root.
+    """
     if failure := _source_checkout_failure():
         return failure
 
@@ -575,12 +584,12 @@ _SECRET_PATTERNS = [
 _SENSITIVE_FILES = {".env", "auro_secrets.yaml", ".auro_secrets.yaml"}
 
 
-@register(
-    "verify_security",
-    "Security checks: secret scanning on modified files, guard validation, sensitive file exposure, "
-    "and tool schema coverage. Returns structured pass/fail report.",
-)
 def verify_security() -> dict:
+    """
+    Security checks: secret scanning over the shipped tree, sensitive files
+    staged for commit, guard coverage of enforceable rules, and tool schema
+    coverage. Returns a structured pass/fail report.
+    """
     if failure := _source_checkout_failure():
         return failure
 
@@ -703,12 +712,6 @@ def verify_security() -> dict:
 # verify_output — orchestrated gate with execution ordering
 # ---------------------------------------------------------------------------
 
-@register(
-    "verify_output",
-    "Run the full Output quality gate in the correct order: static checks first, "
-    "then security, then dynamic checks last. Short-circuits if static checks "
-    "produce errors — dynamic checks are skipped to avoid executing potentially broken code.",
-)
 def verify_output() -> dict:
     """
     Execution order:

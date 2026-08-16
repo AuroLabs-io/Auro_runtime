@@ -50,6 +50,10 @@ def _resolve_api_key() -> str:
 class AnthropicBackend(ModelBackend):
     """ModelBackend implementation calling the Anthropic Messages API."""
 
+    def resolve_model(self, model: str | None = None) -> str:
+        """The model id generate() will call. Single source of truth for it."""
+        return model or os.environ.get("AURO_MODEL", DEFAULT_MODEL)
+
     def generate(
         self,
         system_prompt: str,
@@ -67,7 +71,7 @@ class AnthropicBackend(ModelBackend):
         from anthropic import Anthropic  # lazy: keep the SDK an optional extra
 
         client = Anthropic(api_key=_resolve_api_key())
-        resolved_model = model or os.environ.get("AURO_MODEL", DEFAULT_MODEL)
+        resolved_model = self.resolve_model(model)
         response = client.messages.create(
             model=resolved_model,
             max_tokens=max_tokens,

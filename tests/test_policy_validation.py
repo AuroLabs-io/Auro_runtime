@@ -133,7 +133,7 @@ class TestValidatePoliciesSynthetic:
         result = execute(
             make_tool_call("delete_file", {"path": "output/x.txt"}),
             allowed_tools={"delete_file"},
-            policy_rules=[rule],
+            policy_rules=[rule], run_history=[],
         )
         assert result.success is False
         assert "unscoped" in result.error
@@ -179,16 +179,33 @@ class TestValidatePoliciesSynthetic:
         assert "nonexistent_tool_a" in message
         assert "nonexistent_guard_b" in message
 
-    def test_guard_and_tool_checks_are_skipped_when_registries_not_passed(self, make_rule):
+    def test_omitting_the_registries_checks_against_the_live_ones(self, make_rule):
         """
-        validate_policies(policies) with no registry kwargs only checks
-        enforcement/on_error/duplicates — it should not raise just because a
-        guard or tool name happens to be made up, since it has nothing to
-        check it against.
+        The registries used to default to None, which skipped the guard and tool
+        name checks entirely: the safe call was the one you had to remember to
+        make. Omission now uses the live registries, so a made-up guard or tool
+        raises without the caller having to ask for the check.
         """
-        rule = make_rule(guard="totally_made_up_guard", enforcement="warn", tools=["totally_made_up_tool"])
+        rule = make_rule(guard="totally_made_up_guard", enforcement="warn",
+                         tools=["totally_made_up_tool"])
         binding = PolicyBinding(id="synthetic", rules=[rule])
-        errors = validate_policies([binding])
+
+        with pytest.raises(ValueError) as excinfo:
+            validate_policies([binding])
+        message = str(excinfo.value)
+        assert "totally_made_up_guard" in message
+        assert "totally_made_up_tool" in message
+
+    def test_explicit_none_still_skips_the_registry_checks(self, make_rule):
+        """
+        Negative control, and a real use: validating a policy set before the
+        registries are populated. Passing None deliberately still opts out, so
+        the change above is a change of default rather than of capability.
+        """
+        rule = make_rule(guard="totally_made_up_guard", enforcement="warn",
+                         tools=["totally_made_up_tool"])
+        binding = PolicyBinding(id="synthetic", rules=[rule])
+        errors = validate_policies([binding], guard_registry=None, tool_registry=None)
         assert errors == []
 
 

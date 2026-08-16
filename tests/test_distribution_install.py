@@ -544,13 +544,32 @@ def test_sdist_excludes_tests_and_builds_the_same_authority_set(
     assert {
         "MANIFEST.in",
         "README.md",
+        "docs/API.md",
+        "docs/AUDIT_EVENTS.md",
         "docs/CREDENTIALS.md",
+        "docs/DIRECTIVES.md",
         "docs/TESTS.md",
     } <= members
     # docs/TESTS.md is the generated public catalogue: RESTRICTED_FILES in
     # tests/catalogue.py guarantees it never names a withheld test module, so
     # shipping it no longer risks disclosure. The README links to it, and the
     # link should resolve inside the sdist as well as on GitHub.
+    #
+    # docs/DIRECTIVES.md is the same arrangement for directives, and shipping it
+    # matters more: it is the only enumeration of what tool authority each
+    # shipped directive grants. Its generator lives in tests/ and is pruned
+    # below, so the sdist must carry the output or the README links nowhere.
+    #
+    # docs/AUDIT_EVENTS.md is the third generated catalogue. API.md calls `event`
+    # the grouping key, so the set of names is part of the integration contract
+    # and has to travel with the doc that references it.
+    #
+    # docs/API.md is hand-written rather than generated, so nothing regenerates
+    # it if it goes missing. It is the only description of the executor contract
+    # for an embedder driving execute() directly, and of the matched_fields
+    # obligation a third-party guard has to meet. Asserting it here is the only
+    # thing standing between "the doc was dropped from the sdist" and a release
+    # that ships an unusable extension surface.
     assert not any(
         member == "tests" or member.startswith("tests/")
         for member in members

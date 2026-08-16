@@ -25,6 +25,9 @@ _BASE_DIR = None
 _ARCHIVE_DIR_NAME = ".auro_archive"
 _ARCHIVE_MAX_AGE_DAYS = 30
 _ARCHIVE_MAX_SIZE_MB = 100
+# Cap on the flattened relative path inside an archive filename. The timestamp
+# prefix and any disambiguating suffix are added on top of this.
+_ARCHIVE_NAME_MAX_CHARS = 150
 
 _PROTECTED_PATTERNS = frozenset({
     "auro_runtime",
@@ -51,23 +54,32 @@ def _dirs_from_env(env_var: str, default: frozenset[str]) -> frozenset[str]:
     return configured
 
 
+# Only destinations with a defined purpose are allowlisted. `exports`, `temp`,
+# and `generated` shipped here with nothing writing to them; a name whose only
+# distinguishing property is one that was never built is surface, not structure.
+# `temp` returns when it is a real per-run workspace — see the run-scoped temp
+# thread — rather than as an unenforced label.
 _WRITABLE_DIRS = _dirs_from_env("AURO_RUNTIME_WRITABLE_DIRS", frozenset({
     "output",
     "drafts",
-    "exports",
-    "temp",
-    "generated",
 }))
 
 _DELETE_ALLOWLISTED_DIRS = _dirs_from_env("AURO_RUNTIME_DELETE_ALLOWLISTED_DIRS", frozenset({
     "output",
     "drafts",
-    "exports",
-    "temp",
-    "generated",
 }))
 
 _WRITE_MAX_SIZE_BYTES = 1024 * 1024  # 1MB per write
+
+# Deliberately the same figure as the write cap. read_file previously had no cap
+# at all, so a single call could pull an arbitrarily large file into the tool
+# result and from there into model context — a cost and context-exhaustion path
+# reachable by any directive holding read_file, which is most of them.
+#
+# Refuses rather than truncating. A truncated read that reported success would
+# hand the model a fragment it has no way to recognise as partial, and a
+# confident summary of the first megabyte of a log is worse than an error.
+_READ_MAX_SIZE_BYTES = _WRITE_MAX_SIZE_BYTES
 
 _READ_BLOCKLIST_DIRS = frozenset({
     ".auro_archive",
@@ -216,6 +228,22 @@ def read_file(path: str, encoding: str = "utf-8") -> dict:
         return {"error": f"File does not exist: {path}", "content": None}
     if not p.is_file():
         return {"error": f"Not a file: {path}", "content": None}
+    # Checked from stat() rather than after reading: measuring the string we
+    # already loaded would mean the allocation this cap exists to prevent has
+    # happened by the time we object.
+    try:
+        size_bytes = p.stat().st_size
+    except OSError as e:
+        return {"error": str(e), "content": None}
+    if size_bytes > _READ_MAX_SIZE_BYTES:
+        return {
+            "error": (
+                f"File is {size_bytes // 1024}KB, over the "
+                f"{_READ_MAX_SIZE_BYTES // 1024}KB read limit. This tool reads whole "
+                f"files only; it has no range or chunked mode."
+            ),
+            "content": None,
+        }
     try:
         content = p.read_text(encoding=encoding)
         return {"path": str(p), "content": content}
@@ -244,7 +272,7 @@ def _is_writable_path(p: Path, base: Path) -> str | None:
 @register(
     "write_file",
     "Write content to a file. Only allowed in designated directories "
-    "(output, drafts, exports, temp, generated). "
+    "(output, drafts). "
     "Existing files are backed up to .auro_archive/ before overwrite. Max 1MB per write.",
     args_schema=WriteFileArgs,
 )
@@ -287,6 +315,12 @@ def write_file(path: str, content: str, encoding: str = "utf-8") -> dict:
         write_audit_event("file_written", path=str(path), size=len(content), backed_up=backed_up)
         result = {"path": str(p), "written": True, "size": len(content)}
         if backed_up:
+            # Overwrites feed the same archive deletes do, so they have to prune
+            # it too. Pruning only from delete_file meant a write-heavy,
+            # delete-free workload grew .auro_archive/ past both documented caps
+            # indefinitely — the caps read as archive-wide but governed one path
+            # into it.
+            _prune_archive()
             result["previous_version_archived"] = backed_up
         return result
     except Exception as e:
@@ -327,14 +361,55 @@ def _is_protected(p: Path, base: Path) -> str | None:
     return None
 
 
+def _reserve_archive_name(archive_dir: Path, ts: str, rel: Path) -> Path:
+    """Claim an unused archive filename, creating it. Returns the reserved path."""
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    # Flatten the relative path into the name rather than recreating real
+    # subdirectories: _prune_archive only walks top-level files, so a nested
+    # archive would be written and then never pruned by either cap. Naming the
+    # copy after the basename alone is what let two same-named files from
+    # different directories collide onto one entry.
+    flat = "__".join(rel.parts)
+    if len(flat) > _ARCHIVE_NAME_MAX_CHARS:
+        # Keep the tail: the basename identifies the file better than the
+        # leading directories, and the manifest holds the authoritative path.
+        flat = flat[-_ARCHIVE_NAME_MAX_CHARS:]
+
+    stem, ext = os.path.splitext(f"{ts}_{flat}")
+    candidate = f"{stem}{ext}"
+    attempt = 1
+    while True:
+        archive_path = archive_dir / candidate
+        try:
+            # O_EXCL, not a prior exists() check: shutil.move overwrites an
+            # existing destination silently on both platforms, and a
+            # check-then-move leaves a window for a concurrent worker to take
+            # the same name inside the same one-second timestamp. Reserving the
+            # name means the move can only ever land on our own placeholder, so
+            # no archived file can be destroyed by a later one.
+            fd = os.open(archive_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            attempt += 1
+            candidate = f"{stem}_{attempt}{ext}"
+            continue
+        os.close(fd)
+        return archive_path
+
+
 def _archive_file(p: Path, base: Path) -> Path:
-    """Move file to .auro_archive/ preserving relative structure. Returns archive path."""
+    """Move file to .auro_archive/ under a collision-free name. Returns archive path."""
     archive_dir = _get_archive_dir()
     rel = p.resolve().relative_to(base)
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    archive_path = archive_dir / f"{ts}_{rel.name}"
-    archive_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(p), str(archive_path))
+    archive_path = _reserve_archive_name(archive_dir, ts, rel)
+    try:
+        shutil.move(str(p), str(archive_path))
+    except Exception:
+        # Never leave the empty reservation behind: it would be a zero-byte
+        # entry that prune counts and restore_file would happily "restore".
+        archive_path.unlink(missing_ok=True)
+        raise
 
     manifest_path = archive_dir / "manifest.jsonl"
     entry = {
@@ -358,6 +433,8 @@ def _prune_archive() -> dict:
     cutoff = time.time() - (_ARCHIVE_MAX_AGE_DAYS * 86400)
     max_bytes = _ARCHIVE_MAX_SIZE_MB * 1024 * 1024
     pruned = 0
+    expired: list[str] = []
+    over_capacity: list[str] = []
 
     files = []
     for f in archive_dir.iterdir():
@@ -368,6 +445,7 @@ def _prune_archive() -> dict:
     for f, mtime, size in files:
         if mtime < cutoff:
             f.unlink(missing_ok=True)
+            expired.append(f.name)
             pruned += 1
 
     files = [(f, mt, sz) for f, mt, sz in files if f.exists()]
@@ -376,8 +454,24 @@ def _prune_archive() -> dict:
     while total > max_bytes and files:
         oldest, _, sz = files.pop(0)
         oldest.unlink(missing_ok=True)
+        over_capacity.append(oldest.name)
         total -= sz
         pruned += 1
+
+    if pruned:
+        # This unlink is the only irreversible destruction of user content in
+        # the runtime, and it was the one operation that wrote no audit record.
+        # The archive names encode the original path, so the event says which
+        # files went, and the two lists say why: age, or the size cap. Silence
+        # still means nothing was destroyed.
+        write_audit_event(
+            "archive_pruned",
+            pruned=pruned,
+            expired=expired,
+            over_capacity=over_capacity,
+            retention_days=_ARCHIVE_MAX_AGE_DAYS,
+            max_size_mb=_ARCHIVE_MAX_SIZE_MB,
+        )
 
     return {"pruned": pruned}
 
@@ -385,7 +479,7 @@ def _prune_archive() -> dict:
 @register(
     "delete_file",
     "Soft-delete a file: moves it to .auro_archive/ for recovery. "
-    "Only allowed in designated directories (output, drafts, exports, temp, generated). "
+    "Only allowed in designated directories (output, drafts). "
     "Protected paths (auro_runtime, runtime_tools, policies, directives, .git) are blocked.",
     args_schema=DeleteFileArgs,
 )
@@ -424,7 +518,17 @@ def delete_file(path: str) -> dict:
 
     try:
         archive_path = _archive_file(p, base)
-        write_audit_event("file_deleted", path=str(path), archive=str(archive_path.name))
+        # Named for what happens, not for the tool that did it. This moves the
+        # file into .auro_archive/ and it stays recoverable until pruning takes
+        # it; calling that "deleted" told an auditor the file was gone while it
+        # was still on disk. The retention bound travels with the event, because
+        # the log otherwise cannot say how long recovery was possible.
+        write_audit_event(
+            "file_soft_deleted",
+            path=str(path),
+            archive=str(archive_path.name),
+            retention_days=_ARCHIVE_MAX_AGE_DAYS,
+        )
         _prune_archive()
         return {
             "path": str(p),
@@ -475,16 +579,35 @@ def restore_file(archive_name: str, restore_to: str | None = None) -> dict:
         manifest_path = archive_dir / "manifest.jsonl"
         if not manifest_path.exists():
             return {"error": "No manifest found. Provide restore_to path explicitly.", "restored": False}
-        original_path = None
+        original_paths: list[str] = []
         for line in manifest_path.read_text(encoding="utf-8").strip().splitlines():
             try:
                 entry = json.loads(line)
                 if entry.get("archive_path") == archive_name:
-                    original_path = entry.get("original_path")
+                    candidate = entry.get("original_path")
+                    if candidate and candidate not in original_paths:
+                        original_paths.append(candidate)
             except (json.JSONDecodeError, KeyError):
                 continue
-        if not original_path:
+        if not original_paths:
             return {"error": f"No manifest entry for '{archive_name}'. Provide restore_to path.", "restored": False}
+        # Names written before the collision fix are not unique, so one archive
+        # name can map to several different originals. Taking the last match --
+        # what this did — restores a file under another file's path without
+        # saying so. Repeated deletes of the SAME path are still unambiguous and
+        # still restore, which is why this compares distinct originals, not rows.
+        if len(original_paths) > 1:
+            return {
+                "error": (
+                    f"Ambiguous archive name '{archive_name}': the manifest maps it to "
+                    f"{len(original_paths)} different original paths "
+                    f"({', '.join(sorted(original_paths))}). "
+                    f"Pass restore_to to choose one explicitly."
+                ),
+                "restored": False,
+                "ambiguous_originals": sorted(original_paths),
+            }
+        original_path = original_paths[0]
         dest = (base / original_path).resolve()
         if not _path_under_base(dest, base):
             return {"error": "Original path is outside the allowed project directory.", "restored": False}
@@ -503,7 +626,17 @@ def restore_file(archive_name: str, restore_to: str | None = None) -> dict:
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(archive_path), str(dest))
-        write_audit_event("file_restored", archive=archive_name, restored_to=str(dest))
+        # Audit the workspace-relative path. An absolute one discloses the
+        # deployment's filesystem layout to anything consuming the log, and it
+        # would not correlate with the relative paths file_written and
+        # file_soft_deleted record for the same file. Both branches above already
+        # guarantee dest is under base; the fallback is defence in depth, because
+        # audit must not raise on its way to the log.
+        try:
+            audit_dest = dest.relative_to(base).as_posix()
+        except ValueError:
+            audit_dest = dest.name
+        write_audit_event("file_restored", archive=archive_name, restored_to=audit_dest)
         return {"restored": True, "path": str(dest), "from_archive": archive_name}
     except Exception as e:
         return {"error": str(e), "restored": False}

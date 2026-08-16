@@ -58,6 +58,12 @@ FILE_PURPOSE = {
         "used at audit, executor, transcript, router, model-context, and logging "
         "boundaries. Uses only an ordinary synthetic marker; scanner-evasion probes "
         "remain in the restricted suite.",
+    "test_archive_integrity.py":
+        "Soft delete keeps its promise: an archived file is never destroyed by a "
+        "later one. Archive names carry the directory so same-named files cannot "
+        "share an entry, an existing entry is never overwritten, restore refuses a "
+        "name it cannot resolve to one original, and the retention caps govern the "
+        "write path as well as the delete path.",
     "test_distribution_install.py":
         "Builds a real wheel and sdist, installs each into an isolated environment, "
         "and runs the installed package with no source checkout present. Proves the "

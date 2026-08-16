@@ -47,6 +47,11 @@ def load_policy(path: Path | str) -> PolicyBinding:
     )
 
 
+# Distinguishes "caller said nothing" from "caller explicitly passed None".
+# Omission gets the live registries; an explicit None still opts out.
+_LIVE_REGISTRY: dict = {}
+
+
 def load_policies(policies_dir: Path | str, pattern: str = "*.yaml") -> list[PolicyBinding]:
     """Load all policy files from a directory and return as list."""
     policies_dir = Path(policies_dir)
@@ -61,13 +66,28 @@ def load_policies(policies_dir: Path | str, pattern: str = "*.yaml") -> list[Pol
 
 def validate_policies(
     policies: list[PolicyBinding],
-    guard_registry: dict | None = None,
-    tool_registry: dict | None = None,
+    guard_registry: dict | None = _LIVE_REGISTRY,
+    tool_registry: dict | None = _LIVE_REGISTRY,
 ) -> list[str]:
     """
     Validate all policy rules. Returns a list of error strings.
     Raises ValueError if any errors are found (fail-hard at load time).
+
+    Both registries default to the live ones, so the call that checks guard and
+    tool names is the call you get by writing nothing. Previously they defaulted
+    to None, which skipped those checks entirely: the safe call was the one you
+    had to remember to make. Passing None explicitly still skips, for callers
+    validating a policy set against registries that are not loaded yet.
     """
+    if guard_registry is _LIVE_REGISTRY:
+        from auro_runtime.guards import get_guard_registry
+
+        guard_registry = get_guard_registry()
+    if tool_registry is _LIVE_REGISTRY:
+        from auro_runtime.executor import get_registry
+
+        tool_registry = get_registry()
+
     errors: list[str] = []
     seen_ids: set[str] = set()
 
@@ -192,6 +212,97 @@ def get_enforceable_rules(policies: list[PolicyBinding]) -> list[PolicyRule]:
         )
 
     return enforceable
+
+
+# The reviewed posture of every shipped enforceable rule: which guard runs, at
+# what level, what happens when that guard raises, and which tools it covers.
+#
+# AURO_POLICY_PROFILE=shipped verifies this, not merely that the rule names are
+# present. An id-set comparison passes a rule edited from `block` to `advisory`,
+# because the id does not change -- and that is the edit that hides. An added or
+# removed rule shows up in a diff; a one-word downgrade does not.
+#
+# One definition, imported by both the runtime check and the test suite that
+# pins the same values. Two copies of a pin drift, and a drifting pin is worse
+# than no pin: it reports agreement with itself.
+SHIPPED_ENFORCEMENT_POSTURE: dict[str, dict] = {
+    # policies/default.yaml
+    "no_delete_without_confirm": {
+        "guard": "check_destructive_action", "enforcement": "warn",
+        "on_error": "fail_open", "tools": ["delete_file", "restore_file"],
+    },
+    "log_actions": {
+        "guard": "check_reason_not_empty", "enforcement": "warn",
+        "on_error": "fail_open", "tools": None,
+    },
+    "no_secrets_in_logs": {
+        "guard": "check_no_secrets_in_args", "enforcement": "block",
+        "on_error": "fail_closed", "tools": None,
+    },
+    "sensitive_paths": {
+        "guard": "check_sensitive_paths", "enforcement": "block",
+        "on_error": "fail_closed",
+        "tools": ["read_file", "write_file", "delete_file", "list_dir", "restore_file"],
+    },
+    "no_bulk_writes": {
+        "guard": "check_no_bulk_writes", "enforcement": "warn",
+        "on_error": "fail_open", "tools": ["write_file"],
+    },
+    "write_budget": {
+        "guard": "check_write_budget", "enforcement": "block",
+        "on_error": "fail_closed", "tools": None,
+    },
+    # policies/credential_proxy.yaml
+    "no_hardcoded_secrets": {
+        "guard": "check_no_raw_credentials", "enforcement": "block",
+        "on_error": "fail_closed", "tools": ["http_request"],
+    },
+}
+
+_POSTURE_FIELDS = ("guard", "enforcement", "on_error", "tools")
+
+
+def shipped_posture_drift(policies: list[PolicyBinding]) -> list[str]:
+    """
+    Describe how the reviewed rules differ from how they actually loaded.
+
+    Empty means no drift. The guarantee is that every reviewed rule is present
+    and unmodified, not that the set is exactly the reviewed set: a rule an
+    operator added is not drift, because an addition can only add a check. It
+    cannot weaken one that is already there.
+
+    Caught here: a reviewed rule that stopped reaching the executor (guard
+    removed, or enforcement edited to advisory), one whose guard, enforcement,
+    on_error or tool scope changed, and one defined more than once among the
+    enforceable rules, where which copy applies depends on load order.
+    """
+    by_id: dict[str, list[PolicyRule]] = {}
+    for rule in get_enforceable_rules(policies):
+        by_id.setdefault(rule.id, []).append(rule)
+
+    drift: list[str] = []
+    for rule_id in sorted(SHIPPED_ENFORCEMENT_POSTURE):
+        matches = by_id.get(rule_id, [])
+        if not matches:
+            drift.append(
+                f"{rule_id}: reviewed as enforceable, but it does not reach the "
+                f"executor (no guard, or enforcement is advisory)"
+            )
+            continue
+        if len(matches) > 1:
+            drift.append(
+                f"{rule_id}: defined {len(matches)} times among the enforceable "
+                f"rules, so which one applies depends on load order"
+            )
+            continue
+        expected = SHIPPED_ENFORCEMENT_POSTURE[rule_id]
+        for field in _POSTURE_FIELDS:
+            actual = getattr(matches[0], field)
+            if actual != expected[field]:
+                drift.append(
+                    f"{rule_id}.{field}: reviewed as {expected[field]!r}, loaded as {actual!r}"
+                )
+    return drift
 
 
 def format_policies_for_prompt(policies: list[PolicyBinding]) -> str:

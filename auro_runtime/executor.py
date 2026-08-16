@@ -57,17 +57,120 @@ def _safe_text(value: object) -> str:
     return scrub_text(str(value))
 
 
+def _tool_reported_error(result: object) -> str | None:
+    """
+    The tool's own failure message, or None if it did not report one.
+
+    Tools in this package signal a domain failure by returning a dict with a
+    top-level `error` alongside a falsy status flag (`written: False`,
+    `sent: False`, `resolved: False`, `content: None`) rather than by raising.
+    The executor previously only inspected exceptions, so those returns became
+    `success=True, error=None` and the refusal survived solely inside `result`.
+
+    The `error` key is the failure signal, never a data field: that holds for
+    all 45 error-returns across the four tool modules that have any, and a tool
+    wanting to report an error as *content* must nest it rather than put it at
+    the top level. Falsy values (`None`, `""`) are not failures, so a tool may
+    return `error: None` on its success path without being marked failed.
+
+    Pass the already-sanitized result: the message is surfaced to the caller,
+    so it must not be lifted out of the raw value.
+    """
+    if isinstance(result, dict):
+        err = result.get("error")
+        if err:
+            return _safe_text(err)
+    return None
+
+
+# Verdict codes whose arguments get a targeted redaction pass before the audit
+# record is written. A guard emitting one of these MUST supply
+# metadata["matched_fields"]: the name-based pass alone does not know a bespoke
+# credential sitting under an innocuous key, so a guard that finds one and does
+# not say where logs it in the clear. Pinned by a test over every guard that can
+# emit one, so a third code cannot join this set silently.
+REDACTING_VERDICT_CODES = ("secret_detected", "raw_credential")
+
+
+class _Unrestricted:
+    """
+    Explicit opt-out of one of the executor's security boundaries.
+
+    Never a default. A caller that genuinely wants no capability boundary or no
+    guard evaluation has to name it, so the permissive path is visible at the
+    call site and in review rather than reachable by leaving an argument out.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "UNRESTRICTED"
+
+
+UNRESTRICTED = _Unrestricted()
+
+
+def _incomplete_context(
+    allowed_tools: object,
+    policy_rules: object,
+    run_history: object,
+) -> list[str]:
+    """
+    Name the security inputs a direct caller failed to supply.
+
+    execute() is public, so a partially supplied context must not read as
+    permission to proceed. Note the deliberate asymmetry between the two
+    collections: an empty `allowed_tools` is a real answer, because a directive
+    declaring no tools may call none (see allowed_tools_for). An empty
+    `policy_rules` is not, because zero rules means zero guards run, which is
+    indistinguishable from omitting the argument. An unguarded run has to say
+    UNRESTRICTED out loud.
+    """
+    missing = []
+    if allowed_tools is None:
+        missing.append("allowed_tools")
+    if policy_rules is None or (
+        not isinstance(policy_rules, _Unrestricted) and len(policy_rules) == 0
+    ):
+        missing.append("policy_rules")
+    if run_history is None:
+        missing.append("run_history")
+    return missing
+
+
 def execute(
     tool_call: ToolCallOutput,
-    allowed_tools: set[str] | None = None,
+    allowed_tools: set[str] | _Unrestricted | None = None,
     directive_id: str | None = None,
-    policy_rules: list | None = None,
+    policy_rules: list | _Unrestricted | None = None,
     run_history: list[dict] | None = None,
 ) -> ToolCallResult:
     """
     Execute a single tool call. Validates tool name, allowed_tools, args schema,
     and policy guards before invocation. Returns ToolCallResult.
+
+    The three security inputs are required. Omitting one refuses the call rather
+    than skipping that boundary. Pass UNRESTRICTED to opt out on purpose, or
+    `set()` / `[]` where empty is the real answer.
     """
+    missing = _incomplete_context(allowed_tools, policy_rules, run_history)
+    if missing:
+        error = (
+            f"Incomplete execution context: {', '.join(missing)} not supplied. "
+            f"execute() refuses rather than skipping a security boundary. Supply "
+            f"the value, or executor.UNRESTRICTED to proceed without it on purpose."
+        )
+        write_audit_event(
+            "incomplete_execution_context",
+            **sanitize_fields_with_report(
+                tool=tool_call.tool,
+                directive_id=directive_id,
+                error=error,
+                missing=missing,
+            ),
+        )
+        return ToolCallResult(success=False, result=None, error=error)
+
     safe_tool = _safe_text(tool_call.tool)
     safe_reason = _safe_text(tool_call.reason) if tool_call.reason else None
     if tool_call.tool not in _REGISTRY:
@@ -93,7 +196,7 @@ def execute(
             result=None,
             error=f"Unknown tool: {safe_tool}. Registered: {safe_registered}",
         )
-    if allowed_tools is not None and tool_call.tool not in allowed_tools:
+    if not isinstance(allowed_tools, _Unrestricted) and tool_call.tool not in allowed_tools:
         safe_allowed = sanitize_value(sorted(allowed_tools))
         logger.warning(
             "tool_not_allowed: tool=%s allowed=%s",
@@ -162,7 +265,7 @@ def execute(
         args_to_use = tool_call.args if isinstance(tool_call.args, dict) else {}
 
     # --- Policy guard checks ---
-    if policy_rules:
+    if not isinstance(policy_rules, _Unrestricted):
         from auro_runtime.guards import GuardContext, get_guard_registry, redact_for_audit
 
         guard_registry = get_guard_registry()
@@ -183,6 +286,30 @@ def execute(
 
             guard_fn = guard_registry.get(rule.guard)
             if guard_fn is None:
+                # A rule was written to enforce something and names a guard that
+                # does not exist. Skipping silently makes it indistinguishable
+                # from a guard that approved. Treat it as the guard failing:
+                # honour on_error, and record it either way.
+                write_audit_event(
+                    "policy_guard_missing",
+                    **sanitize_fields_with_report(
+                        tool=tool_call.tool,
+                        directive_id=directive_id,
+                        rule_id=rule.id,
+                        guard=rule.guard,
+                        error=f"Guard '{rule.guard}' is not registered.",
+                        on_error=rule.on_error,
+                    ),
+                )
+                if rule.on_error != "fail_open":
+                    return ToolCallResult(
+                        success=False,
+                        result=None,
+                        error=(
+                            f"Policy guard missing [{rule.id}]: guard "
+                            f"'{rule.guard}' is not registered. Failing closed."
+                        ),
+                    )
                 continue
 
             try:
@@ -213,7 +340,7 @@ def execute(
             if verdict is None:
                 continue
 
-            is_secret_guard = verdict.code in ("secret_detected", "raw_credential")
+            is_secret_guard = verdict.code in REDACTING_VERDICT_CODES
             audit_args = redact_for_audit(
                 tool_call.args if isinstance(tool_call.args, dict) else {},
                 verdict.metadata.get("matched_fields") if verdict.metadata else None,
@@ -254,9 +381,24 @@ def execute(
 
     try:
         result = fn(**args_to_use)
+        safe_result = sanitize_value(result)
+        tool_error = _tool_reported_error(safe_result)
+        if tool_error is not None:
+            # The tool ran and refused. Reporting that as success=True meant a
+            # blocked 2 MiB write was recorded in the run transcript
+            # (orchestrator.py, steps.append) as a successful step, with the
+            # refusal visible only to something that knew to look inside
+            # `result`. The payload is kept rather than blanked: it carries the
+            # tool's own detail (`written: False`, and so on), and unlike the
+            # executor's own refusals above there is a body worth reading.
+            return ToolCallResult(
+                success=False,
+                result=safe_result,
+                error=tool_error,
+            )
         return ToolCallResult(
             success=True,
-            result=sanitize_value(result),
+            result=safe_result,
             error=None,
         )
     except TypeError as e:

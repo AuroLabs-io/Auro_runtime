@@ -83,6 +83,207 @@ def test_zero_policy_gate_allows_exact_explicit_opt_in(monkeypatch, tmp_path):
     assert result["final_summary"] == "explicitly unguarded"
 
 
+def test_a_missing_policies_directory_is_refused_even_with_the_opt_in_set(
+    monkeypatch, tmp_path
+):
+    """
+    The compound case: AURO_ALLOW_NO_POLICIES=1 left in an environment, plus a
+    mistyped policies_dir, must not silently become an unguarded run.
+
+    load_policies() returns [] for a missing directory and for an empty one, so
+    the zero-rules gate alone cannot tell a typo from a deliberate posture. A
+    path that is not there is a configuration error, and no value of the opt-in
+    makes it the operator's intent.
+    """
+    from auro_runtime import orchestrator
+
+    _audit_to_tmp(monkeypatch, tmp_path)
+    missing = tmp_path / "policies-typo"
+    assert not missing.exists(), "the probe must point at a path that is not there"
+    monkeypatch.setenv("AURO_ALLOW_NO_POLICIES", "1")
+
+    def model_must_not_run(*_args, **_kwargs):
+        pytest.fail("the model ran before the missing policies directory was refused")
+
+    monkeypatch.setattr(orchestrator, "generate", model_must_not_run)
+    result = orchestrator.run(
+        "tool_catalog",
+        "probe the missing-directory case",
+        policies_dir=missing,
+    )
+
+    assert result["success"] is False
+    assert result["meta"]["event"] == "policies_dir_missing", (
+        "a missing directory must refuse on its own terms, not as a zero-rules posture"
+    )
+    assert "does not exist" in result["error"]
+
+
+def test_an_existing_empty_policies_directory_still_honours_the_opt_in(
+    monkeypatch, tmp_path
+):
+    """
+    Negative control for the test above. The missing-directory refusal must not
+    swallow the deliberate case: an operator who really wants an unguarded run
+    against a directory that exists still gets one.
+    """
+    from auro_runtime import orchestrator
+
+    _audit_to_tmp(monkeypatch, tmp_path)
+    present = tmp_path / "deliberately-empty"
+    present.mkdir()
+    monkeypatch.setenv("AURO_ALLOW_NO_POLICIES", "1")
+    monkeypatch.setattr(
+        orchestrator,
+        "generate",
+        lambda *_args, **_kwargs: '{"done": true, "summary": "explicitly unguarded"}',
+    )
+
+    result = orchestrator.run(
+        "tool_catalog",
+        "negative control",
+        policies_dir=present,
+    )
+
+    assert result["success"] is True
+    assert result["final_summary"] == "explicitly unguarded"
+
+
+def _copy_shipped_policies(repo_root, dest):
+    dest.mkdir(exist_ok=True)
+    for path in (repo_root / "policies").glob("*.yaml"):
+        (dest / path.name).write_bytes(path.read_bytes())
+    return dest
+
+
+def test_a_downgraded_shipped_rule_is_refused_at_runtime(monkeypatch, tmp_path, repo_root):
+    """
+    The edit that hides: `block` to `advisory` keeps the rule id, so the profile
+    check passed it while the rule stopped reaching the executor entirely.
+
+    `no_secrets_in_logs` is the rule that keeps credentials out of the audit log
+    via tool arguments, which is why it is the one probed here.
+    """
+    from auro_runtime import orchestrator
+
+    _audit_to_tmp(monkeypatch, tmp_path)
+    policies_dir = _copy_shipped_policies(repo_root, tmp_path / "downgraded")
+    target = policies_dir / "default.yaml"
+    text = target.read_text(encoding="utf-8")
+    assert "enforcement: block" in text, "shipped default.yaml no longer has a blocking rule"
+    target.write_text(
+        text.replace("enforcement: block", "enforcement: advisory", 1),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("AURO_POLICY_PROFILE", raising=False)
+
+    def model_must_not_run(*_args, **_kwargs):
+        pytest.fail("the model ran under a downgraded policy posture")
+
+    monkeypatch.setattr(orchestrator, "generate", model_must_not_run)
+    result = orchestrator.run(
+        "tool_catalog",
+        "probe a downgraded shipped rule",
+        policies_dir=policies_dir,
+    )
+
+    assert result["success"] is False
+    assert result["meta"]["event"] == "incomplete_policy_profile"
+    assert "reviewed enforcement posture" in result["error"]
+
+
+def test_an_intact_shipped_profile_still_passes(monkeypatch, tmp_path, repo_root):
+    """
+    Negative control. Without this, the test above only proves the copied policy
+    set was rejected for some reason, not that the downgrade is what did it.
+    """
+    from auro_runtime import orchestrator
+
+    _audit_to_tmp(monkeypatch, tmp_path)
+    policies_dir = _copy_shipped_policies(repo_root, tmp_path / "intact")
+    monkeypatch.delenv("AURO_POLICY_PROFILE", raising=False)
+    monkeypatch.setattr(
+        orchestrator,
+        "generate",
+        lambda *_args, **_kwargs: '{"done": true, "summary": "intact posture"}',
+    )
+
+    result = orchestrator.run(
+        "tool_catalog",
+        "negative control",
+        policies_dir=policies_dir,
+    )
+
+    assert result["success"] is True, f"intact shipped policies were refused: {result.get('error')}"
+
+
+def test_an_added_rule_does_not_cost_the_shipped_profile_check(
+    monkeypatch, tmp_path, repo_root
+):
+    """
+    An addition can only add a check, so it must not force an operator onto
+    `custom`, where they would lose posture verification on the reviewed rules
+    as well. Removals and edits still refuse; this is the safe direction.
+    """
+    from auro_runtime import orchestrator
+
+    _audit_to_tmp(monkeypatch, tmp_path)
+    policies_dir = _copy_shipped_policies(repo_root, tmp_path / "extended")
+    (policies_dir / "site_local.yaml").write_text(
+        "id: site_local\n"
+        "rules:\n"
+        "  - id: site_local_reason_required\n"
+        "    description: Local addition; every call states a reason.\n"
+        "    guard: check_reason_not_empty\n"
+        "    enforcement: block\n"
+        "    on_error: fail_closed\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("AURO_POLICY_PROFILE", raising=False)
+    monkeypatch.setattr(
+        orchestrator,
+        "generate",
+        lambda *_args, **_kwargs: '{"done": true, "summary": "extended profile"}',
+    )
+
+    result = orchestrator.run(
+        "tool_catalog",
+        "probe an extended shipped profile",
+        policies_dir=policies_dir,
+    )
+
+    assert result["success"] is True, f"an added rule was refused: {result.get('error')}"
+
+
+def test_a_removed_rule_still_refuses_under_the_shipped_profile(
+    monkeypatch, tmp_path, repo_root
+):
+    """
+    Control for the test above, in the direction that matters: permitting
+    additions must not have permitted deletions.
+    """
+    from auro_runtime import orchestrator
+
+    _audit_to_tmp(monkeypatch, tmp_path)
+    policies_dir = _copy_shipped_policies(repo_root, tmp_path / "reduced")
+    (policies_dir / "credential_proxy.yaml").unlink()
+    monkeypatch.delenv("AURO_POLICY_PROFILE", raising=False)
+
+    def model_must_not_run(*_args, **_kwargs):
+        pytest.fail("the model ran with a shipped policy binding removed")
+
+    monkeypatch.setattr(orchestrator, "generate", model_must_not_run)
+    result = orchestrator.run(
+        "tool_catalog",
+        "probe a reduced shipped profile",
+        policies_dir=policies_dir,
+    )
+
+    assert result["success"] is False
+    assert result["meta"]["event"] == "incomplete_policy_profile"
+    assert "incomplete" in result["error"]
+
+
 def test_partial_shipped_policy_profile_is_refused(monkeypatch, tmp_path, repo_root):
     """One surviving rule must not masquerade as the complete shipped posture."""
     from auro_runtime import orchestrator

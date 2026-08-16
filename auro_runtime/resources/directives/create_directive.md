@@ -76,7 +76,7 @@ Use `list_tools` and present only the tools relevant to the goal. For each tool 
 | `directives/` | Anyone | Blocked | Blocked |
 | `drafts/directives/` | Anyone | Anyone | Soft delete only |
 | `policies/`, `docs/` | Anyone | Blocked | Blocked |
-| `output/`, `drafts/`, `exports/`, `temp/`, `generated/` | Anyone | Anyone | Soft delete only |
+| `output/`, `drafts/` | Anyone | Anyone | Soft delete only |
 | `auro_runtime/`, `runtime_tools/` | Anyone | Blocked | Blocked |
 | `.git/`, `.auro_archive/`, `__pycache__/` | Blocked | Blocked | Blocked |
 | `auro_secrets.yaml`, `.env` | Blocked | Blocked | Blocked |

@@ -30,14 +30,13 @@ from pydantic import BaseModel
 _EXPECTED_TOOL_NAMES = frozenset({
     "delete_file", "echo", "generate_text", "http_request", "list_dir",
     "list_directives", "list_tools", "read_file", "resolve_secret",
-    "restore_file", "send_notification", "validate_directive",
-    "verify_code_dynamic", "verify_code_static", "verify_output",
-    "verify_security", "write_file",
+    "restore_file", "validate_directive", "write_file",
 })
 
-_VERIFY_TOOLS_WITH_NO_SCHEMA = frozenset({
-    "verify_code_static", "verify_code_dynamic", "verify_security", "verify_output",
-})
+# The four verify_* functions were registered tools until 2026-08-13, and were
+# the only registered tools with no argument schema. They are operator functions
+# now, called directly rather than by a model, so every registered tool takes a
+# schema and the coverage check below has no exemptions left to grant.
 
 # name -> the tool_schemas.py class it must be validated by. Pins the exact
 # wiring, not just "some BaseModel or other" — a copy-paste mixup (e.g.
@@ -55,7 +54,6 @@ _EXPECTED_SCHEMA_BY_TOOL = {
     "validate_directive": "ValidateDirectiveArgs",
     "http_request": "HttpRequestArgs",
     "list_directives": "ListDirectivesArgs",
-    "send_notification": "SendNotificationArgs",
     "generate_text": "GenerateTextArgs",
 }
 
@@ -147,8 +145,8 @@ def _home_path_offenders(repo_root: Path):
 
 
 class TestToolRegistryShape:
-    def test_exactly_seventeen_tools_registered(self, registry):
-        assert len(registry) == 17
+    def test_exactly_twelve_tools_registered(self, registry):
+        assert len(registry) == 12
 
     def test_registered_tool_names_match_expected_set(self, registry):
         assert set(registry.keys()) == _EXPECTED_TOOL_NAMES
@@ -185,9 +183,9 @@ class TestToolRegistryShape:
 
 
 class TestToolSchemas:
-    def test_expected_schema_map_plus_verify_tools_covers_every_tool_name(self):
+    def test_expected_schema_map_covers_every_tool_name(self):
         """Sanity-check the two constants above against each other before trusting either."""
-        assert set(_EXPECTED_SCHEMA_BY_TOOL) | _VERIFY_TOOLS_WITH_NO_SCHEMA == _EXPECTED_TOOL_NAMES
+        assert set(_EXPECTED_SCHEMA_BY_TOOL) == _EXPECTED_TOOL_NAMES
 
     def test_schemas_present_are_pydantic_basemodel_subclasses(self, registry):
         for name, (_fn, _doc, schema) in registry.items():
@@ -196,9 +194,13 @@ class TestToolSchemas:
                     f"{name}: schema {schema!r} is not a BaseModel subclass"
                 )
 
-    def test_exactly_the_four_verify_tools_have_no_schema(self, registry):
-        no_schema = {name for name, (_fn, _doc, schema) in registry.items() if schema is None}
-        assert no_schema == _VERIFY_TOOLS_WITH_NO_SCHEMA
+    def test_every_registered_tool_has_an_argument_schema(self, registry):
+        """
+        No exemptions since 2026-08-13. A registered tool takes model-supplied
+        arguments, so one without a schema is validated by nothing.
+        """
+        no_schema = sorted(name for name, (_fn, _doc, schema) in registry.items() if schema is None)
+        assert no_schema == []
 
     def test_each_tool_is_wired_to_its_expected_schema_class(self, registry):
         for name, expected in _EXPECTED_SCHEMA_BY_TOOL.items():
@@ -213,10 +215,10 @@ class TestToolSchemas:
 
 
 class TestListToolsTool:
-    def test_returns_all_seventeen_with_descriptions(self, registry):
+    def test_returns_all_twelve_with_descriptions(self, registry):
         list_tools_fn = registry["list_tools"][0]
         result = list_tools_fn(include_args=True)
-        assert result["count"] == 17
+        assert result["count"] == 12
         names = {t["name"] for t in result["tools"]}
         assert names == _EXPECTED_TOOL_NAMES
         for t in result["tools"]:
@@ -238,12 +240,12 @@ class TestListToolsTool:
 
     def test_runs_cleanly_through_the_real_executor(self, registry, make_tool_call):
         """Exercises the schema-validation + dispatch path in executor.execute, not just the bare function."""
-        from auro_runtime.executor import execute
+        from auro_runtime.executor import UNRESTRICTED, execute
 
-        result = execute(make_tool_call("list_tools", {}))
+        result = execute(make_tool_call("list_tools", {}), allowed_tools=UNRESTRICTED, policy_rules=UNRESTRICTED, run_history=[])
         assert result.success is True
         assert result.error is None
-        assert result.result["count"] == 17
+        assert result.result["count"] == 12
 
 
 # =============================================================================
@@ -381,6 +383,88 @@ class TestModelBackendSelection:
 
         with pytest.raises(ValueError, match="definitely_not_a_real_backend"):
             get_backend()
+
+    def test_resolve_model_reports_the_id_generate_would_actually_call(self, monkeypatch):
+        """
+        The cost gate needs the resolved id. Without this, `model=None` — the
+        ordinary way to ask for the configured default — is invisible to any
+        check that inspects the caller's argument.
+        """
+        from auro_runtime.models import resolve_model
+        from auro_runtime.models.anthropic_backend import DEFAULT_MODEL
+
+        monkeypatch.delenv("AURO_MODEL_BACKEND", raising=False)
+        monkeypatch.delenv("AURO_MODEL", raising=False)
+        assert resolve_model(None) == DEFAULT_MODEL
+
+        monkeypatch.setenv("AURO_MODEL", "configured-default-model")
+        assert resolve_model(None) == "configured-default-model"
+        # An explicit argument still wins over the configured default.
+        assert resolve_model("explicit-model") == "explicit-model"
+
+
+class TestHighCostModelGate:
+    """
+    The gate reads the model that will be called, not the one that was asked
+    for. It previously read `model` directly, so omitting the argument skipped
+    the check and the backend substituted its configured default immediately
+    afterwards — selecting the expensive model just after the guard against it.
+    """
+
+    def test_the_gate_fires_when_the_expensive_model_comes_from_the_default(self, monkeypatch):
+        monkeypatch.delenv("AURO_MODEL_BACKEND", raising=False)
+        monkeypatch.setenv("AURO_HIGH_COST_MODELS", "opus")
+        monkeypatch.setenv("AURO_MODEL", "claude-opus-4-20250101")
+        from runtime_tools import generate_text_tools
+        from runtime_tools.generate_text_tools import generate_text
+
+        generate_text_tools._REPEAT_CONFIRMED.clear()
+        # `model` deliberately omitted — this is the bypass.
+        result = generate_text(prompt="probe prompt", input_text="x")
+
+        assert result.get("requires_confirmation") is True, (
+            "an expensive model reached the backend without passing the cost gate"
+        )
+        assert result["model"] == "claude-opus-4-20250101", (
+            "the gate must name the model it actually resolved"
+        )
+
+    def test_a_cheap_default_is_not_gated(self, monkeypatch):
+        """
+        Control. Without it, a gate that stopped every call would satisfy the
+        test above. Proved by getting *past* the gate: the call goes on to fail
+        at credential resolution, which only happens after the gate allows it.
+        """
+        monkeypatch.delenv("AURO_MODEL_BACKEND", raising=False)
+        monkeypatch.setenv("AURO_HIGH_COST_MODELS", "opus")
+        monkeypatch.setenv("AURO_MODEL", "claude-haiku-4-5-20251001")
+        monkeypatch.delenv("AURO_ANTHROPIC_API_KEY_ALIAS", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        from runtime_tools import generate_text_tools
+        from runtime_tools.generate_text_tools import generate_text
+
+        generate_text_tools._REPEAT_CONFIRMED.clear()
+        result = generate_text(prompt="probe prompt", input_text="x")
+
+        assert result.get("requires_confirmation") is None, (
+            "a cheap model was gated, so the parametrized gate test proves nothing"
+        )
+        assert "error" in result, "expected the call to proceed past the gate and then fail"
+
+    def test_no_high_cost_list_means_no_gate(self, monkeypatch):
+        """AURO_HIGH_COST_MODELS is empty by default, so the gate is inert."""
+        monkeypatch.delenv("AURO_MODEL_BACKEND", raising=False)
+        monkeypatch.delenv("AURO_HIGH_COST_MODELS", raising=False)
+        monkeypatch.setenv("AURO_MODEL", "claude-opus-4-20250101")
+        monkeypatch.delenv("AURO_ANTHROPIC_API_KEY_ALIAS", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        from runtime_tools import generate_text_tools
+        from runtime_tools.generate_text_tools import generate_text
+
+        generate_text_tools._REPEAT_CONFIRMED.clear()
+        result = generate_text(prompt="probe prompt", input_text="x")
+
+        assert result.get("requires_confirmation") is None
 
     def test_get_backend_works_even_when_provider_sdks_are_unimportable(self, monkeypatch):
         """
