@@ -156,13 +156,20 @@ class TestShippedPolicyEnforcementIsPinned:
 
 # --- The enforcement opt-out surface -------------------------------------
 
-# Every way a policy guard can be stopped from blocking a call, by environment.
+# Every environment route that can weaken the default enforcement posture.
 # The point of pinning this is not that any of them is wrong: each is deliberate,
 # fail-closed when unset, and unreachable by a model. The point is that the SET
 # can grow without anyone noticing, and it already grew past what the people who
 # built it carried in mind. A new AURO_* name in the enforcement path fails this
 # test until someone classifies it, the same way tests/catalogue.py refuses to
 # run for an unclassified test file.
+#
+# Widened 2026-08-15 from "stops a guard from blocking a call" to "weakens the
+# default posture". The original wording matched the original module list, and
+# both excluded the filesystem sandbox: the two AURO_RUNTIME_*_DIRS wideners
+# replace a security-relevant allowlist without touching guard dispatch, so they
+# sat outside the very control built to force a new opt-out to be a deliberate,
+# pinned decision. See OT-opt-out-surface-pin-misses-filesystem-wideners.
 _ENFORCEMENT_ENV_OPT_OUTS = {
     "AURO_ALLOW_NO_POLICIES": (
         "Converts the zero-enforceable-rules refusal into an unguarded run, "
@@ -173,15 +180,27 @@ _ENFORCEMENT_ENV_OPT_OUTS = {
         "the reviewed shipped set. Guards still run; they are no longer verified "
         "to be the reviewed ones."
     ),
+    "AURO_RUNTIME_WRITABLE_DIRS": (
+        "Replaces the write sandbox allowlist. Guard dispatch is untouched, but "
+        "the containment a guard is checked against moves. Raises at import if "
+        "it names a protected directory, so it widens the sandbox, not the "
+        "protected set."
+    ),
+    "AURO_RUNTIME_DELETE_ALLOWLISTED_DIRS": (
+        "The same, for soft-delete. Same import-time refusal on a protected "
+        "directory."
+    ),
 }
 
-# Modules that decide whether a guard runs. Read for AURO_* literals below.
+# Modules that decide whether a guard runs, or what the sandbox it protects is.
+# Repo-relative so the sandbox module outside auro_runtime/ can be included.
 _ENFORCEMENT_PATH = (
-    "orchestrator.py",
-    "executor.py",
-    "policy.py",
-    "guards.py",
-    "directive.py",
+    "auro_runtime/orchestrator.py",
+    "auro_runtime/executor.py",
+    "auro_runtime/policy.py",
+    "auro_runtime/guards.py",
+    "auro_runtime/directive.py",
+    "runtime_tools/file_tools.py",
 )
 
 _AURO_ENV_RE = re.compile(r"AURO_[A-Z_]+")
@@ -200,7 +219,7 @@ class TestEnforcementOptOutSurfaceIsPinned:
     def test_enforcement_path_reads_only_the_pinned_environment_variables(self, repo_root):
         found: dict[str, str] = {}
         for name in _ENFORCEMENT_PATH:
-            path = repo_root / "auro_runtime" / name
+            path = repo_root / name
             for match in _AURO_ENV_RE.findall(path.read_text(encoding="utf-8")):
                 found.setdefault(match, name)
 
@@ -215,7 +234,7 @@ class TestEnforcementOptOutSurfaceIsPinned:
     def test_pinned_opt_outs_are_still_read_where_claimed(self, repo_root):
         """Negative control: a pin naming variables nothing reads proves nothing."""
         source = "\n".join(
-            (repo_root / "auro_runtime" / name).read_text(encoding="utf-8")
+            (repo_root / name).read_text(encoding="utf-8")
             for name in _ENFORCEMENT_PATH
         )
         for name in _ENFORCEMENT_ENV_OPT_OUTS:
@@ -223,6 +242,38 @@ class TestEnforcementOptOutSurfaceIsPinned:
                 f"{name} is pinned as an enforcement opt-out but no longer appears "
                 f"in the enforcement path. Remove it from the pin, and from the docs."
             )
+
+    def test_the_pin_catches_a_new_opt_out_in_the_sandbox_module(self, repo_root):
+        """
+        Negative control for the 2026-08-15 widening.
+
+        The pin above passes both before and after `runtime_tools/file_tools.py`
+        joined the path, because the two names that module reads are now pinned.
+        That makes it silent about whether the new entry is doing any work. This
+        drives the real scan over a mutated copy of that module and asserts the
+        synthetic opt-out is reported, so removing the entry from
+        _ENFORCEMENT_PATH fails here rather than passing quietly.
+        """
+        sandbox_module = "runtime_tools/file_tools.py"
+        assert sandbox_module in _ENFORCEMENT_PATH, (
+            f"{sandbox_module} dropped out of _ENFORCEMENT_PATH; the filesystem "
+            f"wideners are unpinned again. See "
+            f"OT-opt-out-surface-pin-misses-filesystem-wideners."
+        )
+
+        mutated = (repo_root / sandbox_module).read_text(encoding="utf-8") + (
+            '\n_SYNTHETIC = os.environ.get("AURO_RUNTIME_SANDBOX_DISABLED")\n'
+        )
+        unpinned = {
+            match
+            for match in _AURO_ENV_RE.findall(mutated)
+            if match not in _ENFORCEMENT_ENV_OPT_OUTS
+        }
+        assert unpinned == {"AURO_RUNTIME_SANDBOX_DISABLED"}, (
+            f"the scan did not report a new AURO_* name added to {sandbox_module}; "
+            f"reported {unpinned or 'nothing'}. The pin cannot catch what it "
+            f"cannot see."
+        )
 
     def test_only_advisory_drops_a_guarded_rule_from_enforcement(self):
         """
