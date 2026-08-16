@@ -635,3 +635,54 @@ def test_the_sensitive_path_widening_does_not_over_block(
     assert not (result.error and "sensitive_paths" in result.error), (
         f"{path!r} is not a sensitive directory but was refused as one"
     )
+
+
+@pytest.mark.parametrize("path", [
+    "output/.env ",             # trailing space
+    "output/.env.",             # trailing dot
+    "output/.env  ",            # several spaces
+    "output/.env. ",            # dot then space
+    "output/credentials.json ",
+    "output/.htpasswd.",
+])
+def test_trailing_dots_and_spaces_do_not_bypass_the_sensitive_path_guard(
+    path, make_tool_call, enforceable_rules, registry
+):
+    """
+    Windows discards trailing dots and spaces when it opens a file, so
+    `output/.env ` reaches the real `output/.env`. The guard compares strings,
+    and `$` cannot follow a trailing space, so every `$`-anchored pattern was
+    bypassable by appending one character.
+
+    Verified live 2026-08-16 before the fix: this guard allowed the call, the
+    tool's own blocklist allowed it too, and read_file returned the file's
+    contents. Both layers shared one root cause -- comparing against a path the
+    filesystem would not use -- so defense in depth counted for nothing.
+    """
+    result = execute(make_tool_call("read_file", {"path": path}),
+                     allowed_tools={"read_file"}, policy_rules=enforceable_rules,
+                     run_history=[])
+    assert result.success is False, f"{path!r} was allowed"
+    assert "sensitive_paths" in result.error
+
+
+@pytest.mark.parametrize("path", [
+    "output/envelope.txt",     # begins with env, is not .env
+    "output/notes.txt",
+    "output/report.final.md",  # interior dots are ordinary
+    "output/.environment",     # longer name, not .env
+])
+def test_the_trailing_character_strip_does_not_over_block(
+    path, make_tool_call, enforceable_rules, registry
+):
+    """
+    Control for the test above. Stripping trailing dots and spaces must not
+    turn the patterns into prefix matches, and must not disturb names whose
+    dots are interior -- without this, blocking everything would pass.
+    """
+    result = execute(make_tool_call("read_file", {"path": path}),
+                     allowed_tools={"read_file"}, policy_rules=enforceable_rules,
+                     run_history=[])
+    assert not (result.error and "sensitive_paths" in result.error), (
+        f"{path!r} is not sensitive but was refused as one"
+    )

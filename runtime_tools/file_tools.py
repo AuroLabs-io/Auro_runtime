@@ -111,12 +111,25 @@ def _is_read_blocked(p: Path, base: Path) -> str | None:
     if not parts:
         return None
 
-    name = p.name.lower()
+    # Strip trailing dots and spaces before comparing, on every component.
+    # Windows discards them when it opens the file, so `.env ` and `.env.` both
+    # reach the real `.env` while comparing unequal to it as strings.
+    #
+    # The directory loop below was already safe by accident: `parts` comes from
+    # p.resolve(), which normalises them away on Windows. The filename check was
+    # not, because it read `p.name` from the *unresolved* path -- so within this
+    # one function the two checks disagreed about which path they were judging.
+    # Confirmed live 2026-08-16: this returned None for `.env `, and the read
+    # that followed returned the real file's contents.
+    def _norm(s: str) -> str:
+        return (s.rstrip(" .") or s).lower()
+
+    name = _norm(p.name)
 
     # Check every path component, not just the top one: a nested .git/, __pycache__/
     # or .auro_archive/ anywhere below the root must be blocked too.
     for part in parts:
-        if part.lower() in _READ_BLOCKLIST_DIRS:
+        if _norm(part) in _READ_BLOCKLIST_DIRS:
             return f"Access to '{part}' is blocked."
 
     if name in _READ_BLOCKLIST_FILES:

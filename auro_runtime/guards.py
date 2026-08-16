@@ -239,7 +239,25 @@ _PATH_ARG_KEYS = frozenset({
 
 
 def _canonicalize_path(p: str) -> str:
-    """Normalize a path string for security comparison."""
+    r"""
+    Normalize a path string for security comparison.
+
+    Trailing dots and spaces are stripped from every component, because Windows
+    strips them when it opens the file and this guard compares strings. Without
+    it, `output/.env ` did not match the `\.env(\..*)?$` pattern -- `$` cannot
+    follow a trailing space -- so the guard allowed the call and the filesystem
+    then opened the real `output/.env`. Confirmed live 2026-08-16: the read
+    returned the file's contents through this guard AND the tool's own
+    blocklist, which shared the same root cause. `.env.` behaved identically.
+
+    Applied on every platform, not only Windows. On Linux `.env ` and `.env` are
+    genuinely different files, so this over-classifies there by a hair: a file
+    deliberately named with a trailing space is refused as if it were the real
+    one. That is the fail-closed direction (D-038), it costs nothing real, and
+    the alternative is a classifier whose answer depends on the host OS -- the
+    same mistake as letting a resolver decide whether an SSRF destination is
+    refused.
+    """
     p = p.replace("\\", "/")
     p = re.sub(r"%2[eE]", ".", p)
     try:
@@ -247,6 +265,7 @@ def _canonicalize_path(p: str) -> str:
         p = str(PurePosixPath(p))
     except Exception:
         pass
+    p = "/".join(part.rstrip(" .") or part for part in p.split("/"))
     if os.name == "nt":
         p = p.lower()
     return p

@@ -1,6 +1,6 @@
 # Test catalogue
 
-**273 test functions** across 11 files.
+**275 test functions** across 11 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -19,7 +19,7 @@ result in this repository depends on it.
 |---|---:|
 | [`tests/test_policy_validation.py`](../tests/test_policy_validation.py) | 30 |
 | [`tests/test_guard_bindings.py`](../tests/test_guard_bindings.py) | 15 |
-| [`tests/test_enforcement.py`](../tests/test_enforcement.py) | 40 |
+| [`tests/test_enforcement.py`](../tests/test_enforcement.py) | 42 |
 | [`tests/test_credentials.py`](../tests/test_credentials.py) | 38 |
 | [`tests/test_registry.py`](../tests/test_registry.py) | 35 |
 | [`tests/test_directives.py`](../tests/test_directives.py) | 23 |
@@ -28,7 +28,7 @@ result in this repository depends on it.
 | [`tests/test_audit_disclosure.py`](../tests/test_audit_disclosure.py) | 27 |
 | [`tests/test_archive_integrity.py`](../tests/test_archive_integrity.py) | 6 |
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 7 |
-| **Total** | **273** |
+| **Total** | **275** |
 
 ---
 
@@ -117,7 +117,7 @@ Every registered guard is bound by some policy rule, and every rule names a guar
 
 The executor's refusal pipeline: registry check, directive scope, argument schema, then policy guards across block/warn/advisory and fail_closed/fail_open.
 
-40 tests.
+42 tests.
 
 - **unknown tool is refused**
 - **known tool with no restrictions succeeds**
@@ -159,6 +159,8 @@ The executor's refusal pipeline: registry check, directive scope, argument schem
 - **a nested error key is not treated as a refusal** — Only a top-level `error` is the failure signal. A tool reporting errors as
 - **sensitive directories are blocked in bare and trailing slash forms** — The directory patterns required a trailing separator, and
 - **the sensitive path widening does not over block** — Control for the test above. Alternating the trailing separator with `$`
+- **trailing dots and spaces do not bypass the sensitive path guard** — Windows discards trailing dots and spaces when it opens a file, so
+- **the trailing character strip does not over block** — Control for the test above. Stripping trailing dots and spaces must not
 
 ---
 
