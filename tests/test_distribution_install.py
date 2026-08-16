@@ -544,10 +544,12 @@ def test_sdist_excludes_tests_and_builds_the_same_authority_set(
     assert {
         "MANIFEST.in",
         "README.md",
+        "SECURITY.md",
         "docs/API.md",
         "docs/AUDIT_EVENTS.md",
         "docs/CREDENTIALS.md",
         "docs/DIRECTIVES.md",
+        "docs/FAQ.md",
         "docs/TESTS.md",
     } <= members
     # docs/TESTS.md is the generated public catalogue: RESTRICTED_FILES in
@@ -563,6 +565,14 @@ def test_sdist_excludes_tests_and_builds_the_same_authority_set(
     # docs/AUDIT_EVENTS.md is the third generated catalogue. API.md calls `event`
     # the grouping key, so the set of names is part of the integration contract
     # and has to travel with the doc that references it.
+    #
+    # SECURITY.md and docs/FAQ.md were added to this set on 2026-08-16, for the
+    # same reason as DIRECTIVES.md rather than as a formality. SECURITY.md is
+    # where a reporter is told which channel is private and, just as usefully,
+    # which findings are already-documented boundaries rather than defects; it
+    # cites docs/FAQ.md for several of them, so shipping one without the other
+    # leaves the security policy pointing nowhere from inside the sdist. Neither
+    # is generated, so nothing else would notice them dropping out of MANIFEST.in.
     #
     # docs/API.md is hand-written rather than generated, so nothing regenerates
     # it if it goes missing. It is the only description of the executor contract

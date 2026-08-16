@@ -47,6 +47,8 @@ auro-runtime = "auro_runtime.__main__:main"
 
 [project.urls]
 Homepage = "https://aurolabs.io"
+Repository = "https://github.com/AuroLabs-io/auro_runtime"
+Issues = "https://github.com/AuroLabs-io/auro_runtime/issues"
 
 [tool.setuptools.packages.find]
 include = ["auro_runtime*", "runtime_tools*"]
