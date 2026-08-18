@@ -1,6 +1,6 @@
 # Test catalogue
 
-**308 test functions** across 13 files.
+**310 test functions** across 13 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -21,7 +21,7 @@ result in this repository depends on it.
 | [`tests/test_guard_bindings.py`](../tests/test_guard_bindings.py) | 15 |
 | [`tests/test_classifier_pins.py`](../tests/test_classifier_pins.py) | 11 |
 | [`tests/test_enforcement.py`](../tests/test_enforcement.py) | 43 |
-| [`tests/test_sensitive_resource_classification.py`](../tests/test_sensitive_resource_classification.py) | 12 |
+| [`tests/test_sensitive_resource_classification.py`](../tests/test_sensitive_resource_classification.py) | 14 |
 | [`tests/test_credentials.py`](../tests/test_credentials.py) | 38 |
 | [`tests/test_registry.py`](../tests/test_registry.py) | 35 |
 | [`tests/test_directives.py`](../tests/test_directives.py) | 23 |
@@ -30,7 +30,7 @@ result in this repository depends on it.
 | [`tests/test_audit_disclosure.py`](../tests/test_audit_disclosure.py) | 27 |
 | [`tests/test_archive_integrity.py`](../tests/test_archive_integrity.py) | 6 |
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 7 |
-| **Total** | **308** |
+| **Total** | **310** |
 
 ---
 
@@ -195,7 +195,7 @@ The executor's refusal pipeline: registry check, directive scope, argument schem
 
 The single sensitive-resource inventory and both layers that consume it. Covers that the policy guard and the file tool agree on every family and category, that the tool classifies the resolved path rather than the basename, and that normalisation is host-independent. Facts about this repository's own inventory; the traversal and evasion corpora stay restricted.
 
-12 tests.
+14 tests.
 
 ### TestTheInventoryIsSharedNotCopied
 
@@ -207,6 +207,10 @@ The single sensitive-resource inventory and both layers that consume it. Covers 
 - **the same plain names outside one are not** — Control. Without this, classifying everything would pass above.
 - **read file refuses a plain name inside a credential directory** — The property above, driven through the real tool rather than the
 - **read file still returns an ordinary neighbouring file** — Control for the test above, in the same directory tree.
+### TestFilesystemAliasesAreResolvedBeforeClassification
+
+- **an alternate data stream suffix does not reach file contents** — `output/.env::$DATA` opens the real `output/.env` on NTFS. Measured
+- **an 83 short name alias is expanded before classification** — A short-name alias expands per existing component, so `SSH~1/anything`
 ### TestNormalisationIsSharedAndHostIndependent
 
 - **case is folded on every platform** — Lowercasing used to happen only under `os.name == "nt"`, while the copy

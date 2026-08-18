@@ -22,6 +22,7 @@ defeating path validation in general. The traversal and evasion corpora stay in
 the restricted pack.
 """
 
+import os
 from pathlib import Path
 
 import pytest
@@ -194,6 +195,74 @@ class TestTheResolvedSubjectIsWiderThanTheBasename:
 
         assert "error" not in result, result
         assert "ordinary content" in result["content"]
+
+
+class TestFilesystemAliasesAreResolvedBeforeClassification:
+    """Aliases the string layer cannot see, and the resolved layer closes.
+
+    Both cases below were measured on Windows 11 / NTFS on 2026-08-18 rather
+    than reasoned about. In both, `Path.resolve()` returns the real target, so a
+    layer classifying the resolved path refuses them while a layer classifying
+    the caller's string does not -- which is the argument for the architecture,
+    stated as a test rather than as a comment.
+    """
+
+    @pytest.mark.skipif(os.name != "nt", reason="NTFS alternate data streams")
+    def test_an_alternate_data_stream_suffix_does_not_reach_file_contents(
+        self, workspace_probe
+    ):
+        """
+        `output/.env::$DATA` opens the real `output/.env` on NTFS. Measured
+        against commit 19175eb, this returned the file's contents through both
+        enforcement layers: the guard's patterns are `$`-anchored and `::$DATA`
+        follows the anchor, and the tool compared a basename of `.env::$DATA`
+        against a literal set. Same shape as the trailing-dot bypass of
+        2026-08-16 and reachable the same way, with only read_file.
+        """
+        workspace_probe("output/.env", "AURO_TEST_PROBE_VALUE=xyz\n")
+
+        result = read_file(path="output/.env::$DATA")
+
+        assert "error" in result, f"the stream form was read: {result!r}"
+        assert "AURO_TEST_PROBE_VALUE" not in str(result)
+
+    @pytest.mark.skipif(os.name != "nt", reason="NTFS 8.3 short names")
+    def test_an_83_short_name_alias_is_expanded_before_classification(
+        self, tmp_path
+    ):
+        """
+        A short-name alias expands per existing component, so `SSH~1/anything`
+        resolves into `.ssh/` even when the leaf does not exist. The string layer
+        cannot catch this -- `SSH~1` matches no pattern and no amount of string
+        normalisation makes it -- which is gap 3 of the resolved-resource card.
+
+        Skipped rather than failed where 8.3 generation is off for the volume:
+        the alias simply does not exist there, and asserting on an alias the
+        filesystem never created would prove nothing either way.
+        """
+        import ctypes
+        from ctypes import wintypes
+
+        base = tmp_path.resolve()
+        ssh = base / ".ssh"
+        ssh.mkdir()
+        (ssh / "config").write_text("Host probe\n", encoding="utf-8")
+
+        get_short = ctypes.windll.kernel32.GetShortPathNameW
+        get_short.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+        get_short.restype = wintypes.DWORD
+        buf = ctypes.create_unicode_buffer(1024)
+        if not get_short(str(ssh), buf, 1024) or Path(buf.value) == ssh:
+            pytest.skip("8.3 short-name generation is disabled for this volume")
+
+        alias = Path(buf.value) / "config"
+        assert classify_text(str(alias)) is None, (
+            "this test is meaningless unless the string layer really is blind "
+            "to the alias -- if it now catches it, the premise changed"
+        )
+        assert classify_resolved(alias, base) is not None, (
+            f"{alias} resolves into .ssh/ and was not classified"
+        )
 
 
 class TestNormalisationIsSharedAndHostIndependent:
