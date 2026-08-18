@@ -29,6 +29,11 @@ FILE_PURPOSE = {
         "Every registered guard is bound by some policy rule, and every rule names "
         "a guard that exists. A registered-but-unbound guard reads as protection "
         "while never running.",
+    "test_classifier_pins.py":
+        "Law 10's enforcement: every caller-supplied locator argument is inspected "
+        "or exempt on the record, and every security inventory declares whether it "
+        "names places or matches secret values. A classifier that judges a string "
+        "the filesystem or socket will read differently is the class these pin.",
     "test_enforcement.py":
         "The executor's refusal pipeline: registry check, directive scope, argument "
         "schema, then policy guards across block/warn/advisory and "

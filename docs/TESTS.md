@@ -1,6 +1,6 @@
 # Test catalogue
 
-**284 test functions** across 11 files.
+**294 test functions** across 12 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -19,6 +19,7 @@ result in this repository depends on it.
 |---|---:|
 | [`tests/test_policy_validation.py`](../tests/test_policy_validation.py) | 30 |
 | [`tests/test_guard_bindings.py`](../tests/test_guard_bindings.py) | 15 |
+| [`tests/test_classifier_pins.py`](../tests/test_classifier_pins.py) | 10 |
 | [`tests/test_enforcement.py`](../tests/test_enforcement.py) | 42 |
 | [`tests/test_credentials.py`](../tests/test_credentials.py) | 38 |
 | [`tests/test_registry.py`](../tests/test_registry.py) | 35 |
@@ -28,7 +29,7 @@ result in this repository depends on it.
 | [`tests/test_audit_disclosure.py`](../tests/test_audit_disclosure.py) | 27 |
 | [`tests/test_archive_integrity.py`](../tests/test_archive_integrity.py) | 6 |
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 7 |
-| **Total** | **284** |
+| **Total** | **294** |
 
 ---
 
@@ -110,6 +111,29 @@ Every registered guard is bound by some policy rule, and every rule names a guar
 
 - **every guard is callable with exactly one required parameter** — Mirrors the signature check validate_policies() performs at load
 - **every guard no ops cleanly on an unrelated benign call** — None of the 7 guards have any business objecting to a plain `echo`
+
+---
+
+## `tests/test_classifier_pins.py`
+
+Law 10's enforcement: every caller-supplied locator argument is inspected or exempt on the record, and every security inventory declares whether it names places or matches secret values. A classifier that judges a string the filesystem or socket will read differently is the class these pin.
+
+10 tests.
+
+### TestLocatorArgumentsAreClassified
+
+- **every locator argument is inspected or exempt**
+- **pinned keys are falsifiable against actual reach** — Law 16c. A key matching no tool field is reach the guard does not have.
+- **exempt arguments still exist** — Negative control: exempting arguments nothing declares proves nothing.
+- **the scan reports an unclassified locator argument** — Negative control for the scan itself.
+### TestLocatorClassifiersAreInventoried
+
+- **every security inventory is classified**
+- **classified inventories still exist** — Negative control: pinning names nothing defines proves nothing.
+- **every locator module declares how it obtains its subject**
+- **the shared canonicaliser is actually shared where claimed** — Every module declaring `shared` must really CALL it.
+- **the duplication is recorded and has not grown** — The honest half. This pin does not pretend the refactor happened.
+- **the scan reports a new inventory** — Negative control for the scan.
 
 ---
 
