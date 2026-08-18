@@ -92,6 +92,7 @@ FILE_ORDER = list(FILE_PURPOSE)
 RESTRICTED_FILES = frozenset({
     "test_file_tools_safety.py",       # general path-validation attack corpus
     "test_secret_scanning_evasions.py",  # general scanner-evasion techniques, split out of test_enforcement.py
+    "test_egress_evasions.py",         # general SSRF host-encoding corpus; the four named bypasses publish from test_security_p0.py
 })
 
 

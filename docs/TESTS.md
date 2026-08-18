@@ -1,6 +1,6 @@
 # Test catalogue
 
-**275 test functions** across 11 files.
+**284 test functions** across 11 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -24,11 +24,11 @@ result in this repository depends on it.
 | [`tests/test_registry.py`](../tests/test_registry.py) | 35 |
 | [`tests/test_directives.py`](../tests/test_directives.py) | 23 |
 | [`tests/test_end_to_end.py`](../tests/test_end_to_end.py) | 17 |
-| [`tests/test_security_p0.py`](../tests/test_security_p0.py) | 35 |
+| [`tests/test_security_p0.py`](../tests/test_security_p0.py) | 44 |
 | [`tests/test_audit_disclosure.py`](../tests/test_audit_disclosure.py) | 27 |
 | [`tests/test_archive_integrity.py`](../tests/test_archive_integrity.py) | 6 |
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 7 |
-| **Total** | **275** |
+| **Total** | **284** |
 
 ---
 
@@ -341,7 +341,7 @@ Full runs through the real CLI against a stub model server. Only inference is st
 
 Regression tests for the package-owned authority split: zero-policy refusal, workspace resolution, protected-path writes, directive exposure sets, MCP startup enforcement, and the static verifier's source-checkout and encoding contracts. Every case proves a seam that is closed in shipped code.
 
-35 tests.
+44 tests.
 
 - **zero policy gate rejects every non explicit opt in** — Only the exact documented value ``1`` may disable every policy guard.
 - **zero policy gate allows exact explicit opt in** — Positive control: the documented escape hatch remains usable.
@@ -378,6 +378,15 @@ Regression tests for the package-owned authority split: zero-policy refusal, wor
 - **static verifier rejects a utf8 bom with a named diagnostic** — The encoding contract is enforced on a hostile tree, not inferred.
 - **installed verifiers return source checkout required** — An installed wheel must refuse as data instead of leaking an exception.
 - **secret scan covers release manifest and ci workflows** — The whole-tree claim includes publication files outside Python packages.
+- **hostname resolving to a private address is refused** — Bypass 1. A public-looking name pointing inward must be refused.
+- **redirect hops are revalidated** — Bypass 2. A redirect must not walk to an address refused when named.
+- **ipv6 destinations are refused** — Bypass 3. The old range table held five IPv4 networks and no IPv6.
+- **backslash authority differential is refused** — Bypass 4. urlparse and urllib3 disagree about where the authority ends.
+- **a permitted destination still completes** — Positive control. Without this the refusal tests above would also pass
+- **globally routable addresses are not refused** — Negative control on the deny-set: it must not simply refuse everything.
+- **the destination check is actually installed** — The adapter must really replace the connection class.
+- **mounting the guard does not alter other pool managers** — urllib3 assigns pool_classes_by_scheme by reference without copying.
+- **no registered tool issues its own http request** — A tool must not carry a private destination check.
 
 ---
 

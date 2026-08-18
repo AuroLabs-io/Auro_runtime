@@ -862,3 +862,264 @@ def test_secret_scan_covers_release_manifest_and_ci_workflows(
         if finding["code"] == "SECRET_DETECTED"
     }
     assert {"MANIFEST.in", ".github/workflows/ci.yml"} <= detected_files
+
+
+# ---------------------------------------------------------------------------
+# Destination control for outbound HTTP.
+#
+# The four bypasses named in OT-http-request-destination-is-unenforced's close
+# condition, each proven closed against the real requests stack. The wider
+# corpus of evasion encodings lives in test_egress_evasions.py, which is
+# RESTRICTED under D-043: these four are proof-of-fix for a closed Auro seam,
+# the corpus is transferable technique.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def loopback_server():
+    """A real HTTP server on 127.0.0.1. Yields (port, served_paths, redirect_to)."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    served: list[str] = []
+    redirect_to: list[str] = [""]
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            served.append(self.path)
+            if self.path == "/redirect":
+                self.send_response(302)
+                self.send_header("Location", redirect_to[0])
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.end_headers()
+            host = (self.headers.get("Host") or "").encode()
+            self.wfile.write(b"INTERNAL-ONLY|host=" + host)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield server.server_address[1], served, redirect_to
+    finally:
+        server.shutdown()
+
+
+def _stub_resolver(monkeypatch, name: str, address: str) -> None:
+    """Make ``name`` resolve to ``address``; everything else resolves normally."""
+    import socket
+
+    real = socket.getaddrinfo
+
+    def fake(host, port, *args, **kwargs):
+        if host == name:
+            family = socket.AF_INET6 if ":" in address else socket.AF_INET
+            sockaddr = (address, port, 0, 0) if ":" in address else (address, port)
+            return [(family, socket.SOCK_STREAM, 6, "", sockaddr)]
+        return real(host, port, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake)
+
+
+def test_hostname_resolving_to_a_private_address_is_refused(
+    monkeypatch, loopback_server
+):
+    """Bypass 1. A public-looking name pointing inward must be refused.
+
+    The old check called ipaddress.ip_address() on the URL's host text and
+    swallowed the ValueError every hostname raises, so names were never
+    checked at all -- the filter constrained IP literals and nothing else.
+    """
+    from runtime_tools.http_request_tools import http_request
+
+    port, served, _ = loopback_server
+    _stub_resolver(monkeypatch, "totally-legit-api.example", "127.0.0.1")
+
+    result = http_request(url=f"http://totally-legit-api.example:{port}/internal")
+
+    assert "127.0.0.1 is a loopback address" in result["error"]
+    assert served == [], "the request reached the server despite the refusal"
+
+
+def test_redirect_hops_are_revalidated(monkeypatch, loopback_server):
+    """Bypass 2. A redirect must not walk to an address refused when named.
+
+    requests follows redirects by default and the old check saw only the
+    initial URL, so 169.254.169.254 was refused directly and reached in one
+    hop. Validation now sits below redirect handling: a hop is a connection.
+    """
+    from auro_runtime import egress
+    from runtime_tools.http_request_tools import http_request
+
+    port, served, redirect_to = loopback_server
+    redirect_to[0] = "http://169.254.169.254/latest/meta-data/"
+
+    # Permit hop 1 only, so hop 2 is the thing under test rather than hop 1.
+    real = egress.address_is_denied
+    monkeypatch.setattr(
+        egress,
+        "address_is_denied",
+        lambda a: None if str(egress._effective_address(a)) == "127.0.0.1" else real(a),
+    )
+
+    result = http_request(url=f"http://127.0.0.1:{port}/redirect")
+
+    assert "/redirect" in served, "hop 1 must be served, or hop 2 is untested"
+    assert "Blocked request to 169.254.169.254" in result["error"]
+
+
+@pytest.mark.parametrize(
+    "literal, expected",
+    [
+        ("[::1]", "loopback"),
+        ("[fd00::1]", "private"),
+        ("[fe80::1]", "link-local"),
+        ("[::ffff:127.0.0.1]", "loopback"),
+    ],
+)
+def test_ipv6_destinations_are_refused(loopback_server, literal, expected):
+    """Bypass 3. The old range table held five IPv4 networks and no IPv6.
+
+    ::ffff:127.0.0.1 is the sharp one: it parses as an IPv6Address, was never
+    compared against the IPv4-only table, and reaches IPv4 loopback on any
+    dual-stack host.
+    """
+    from runtime_tools.http_request_tools import http_request
+
+    port, served, _ = loopback_server
+
+    result = http_request(url=f"http://{literal}:{port}/x")
+
+    assert expected in result["error"], result
+    assert served == []
+
+
+def test_backslash_authority_differential_is_refused(loopback_server):
+    """Bypass 4. urlparse and urllib3 disagree about where the authority ends.
+
+    urlparse follows RFC 3986 and reads the trailing name as the host; urllib3
+    terminates the authority at the backslash, WHATWG-style, and dials what
+    precedes it. Validating with either parser validates the wrong host, which
+    is why the check moved to the resolved address at connect time.
+    """
+    from runtime_tools.http_request_tools import http_request
+
+    port, served, _ = loopback_server
+    url = "http://127.0.0.1:" + str(port) + "\\@legit-looking-host.example/x"
+
+    result = http_request(url=url)
+
+    assert "127.0.0.1 is a loopback address" in result["error"]
+    assert served == [], "the parser differential still reached the server"
+
+
+def test_a_permitted_destination_still_completes(monkeypatch, loopback_server):
+    """Positive control. Without this the refusal tests above would also pass
+    if the transport were simply broken and nothing ever connected.
+
+    Also proves pinning did not damage the Host header: the connection is made
+    to a vetted literal address while Host still names what the caller asked
+    for, which is what keeps TLS SNI and certificate verification correct.
+    """
+    from auro_runtime import egress
+    from runtime_tools.http_request_tools import http_request
+
+    port, served, _ = loopback_server
+    monkeypatch.setattr(egress, "address_is_denied", lambda addr: None)
+
+    result = http_request(url=f"http://localhost:{port}/permitted")
+
+    assert result["status_code"] == 200
+    assert served == ["/permitted"]
+    assert f"host=localhost:{port}" in result["body"]
+
+
+def test_globally_routable_addresses_are_not_refused():
+    """Negative control on the deny-set: it must not simply refuse everything.
+
+    A deny-set that returned a reason for every address would pass every
+    refusal test in this file while making the tool useless.
+    """
+    import ipaddress
+
+    from auro_runtime.egress import address_is_denied
+
+    for public in ("8.8.8.8", "1.1.1.1", "140.82.121.4", "2606:4700::1111"):
+        assert address_is_denied(ipaddress.ip_address(public)) is None, public
+
+
+def test_the_destination_check_is_actually_installed():
+    """The adapter must really replace the connection class.
+
+    A control that mounts cleanly while guarding nothing is worse than no
+    control, and requests>=2.28 does not constrain urllib3 to the v2 layout
+    these overrides target.
+    """
+    from auro_runtime.egress import (
+        _GuardedHTTPConnection,
+        _GuardedHTTPSConnection,
+        guarded_session,
+    )
+
+    session = guarded_session()
+    try:
+        pools = session.get_adapter("https://example.invalid").poolmanager
+        assert pools.pool_classes_by_scheme["http"].ConnectionCls is _GuardedHTTPConnection
+        assert pools.pool_classes_by_scheme["https"].ConnectionCls is _GuardedHTTPSConnection
+    finally:
+        session.close()
+
+
+def test_mounting_the_guard_does_not_alter_other_pool_managers():
+    """urllib3 assigns pool_classes_by_scheme by reference without copying.
+
+    Mutating it in place would swap the connection class for every PoolManager
+    in the process, including the model backend's, which must reach a local
+    Ollama server. The adapter therefore replaces the mapping.
+    """
+    import urllib3.poolmanager
+
+    from auro_runtime.egress import guarded_session
+
+    before = dict(urllib3.poolmanager.pool_classes_by_scheme)
+    session = guarded_session()
+    try:
+        session.get_adapter("https://example.invalid")
+        assert urllib3.poolmanager.pool_classes_by_scheme == before
+    finally:
+        session.close()
+
+
+def test_no_registered_tool_issues_its_own_http_request():
+    """A tool must not carry a private destination check.
+
+    The per-tool approach was the defect this P0 named: send_notification once
+    shipped its own weaker filter covering four literal spellings and no
+    private ranges at all. It was cut under D-046, so nothing violates this
+    today -- the pin exists so the next network-capable tool cannot reintroduce
+    it silently, which is the close condition's actual requirement.
+    """
+    import re
+    from pathlib import Path
+
+    tool_dir = Path(__file__).resolve().parent.parent / "runtime_tools"
+    direct_egress = re.compile(
+        r"\brequests\.(get|post|put|delete|head|patch|request|Session)\b"
+        r"|\burllib\.request\.urlopen\b"
+        r"|\bhttp\.client\.HTTP"
+    )
+
+    offenders = {
+        path.name: sorted(set(direct_egress.findall(path.read_text(encoding="utf-8"))))
+        for path in sorted(tool_dir.glob("*.py"))
+        if direct_egress.search(path.read_text(encoding="utf-8"))
+    }
+
+    assert offenders == {}, (
+        f"tool modules issue HTTP outside auro_runtime.egress: {offenders}. "
+        "Route them through guarded_request() -- a tool that brings its own "
+        "destination check brings a weaker one."
+    )

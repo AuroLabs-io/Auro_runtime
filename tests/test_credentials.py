@@ -324,23 +324,38 @@ def test_resolve_secret_on_missing_alias(registry):
 # --- http_request auth_alias --------------------------------------------------
 
 
-def test_http_request_injects_the_resolved_token(env_secret, registry, monkeypatch):
+class _Resp:
+    status_code = 200
+    headers = {"Content-Type": "text/plain"}
+    text = "ok"
+
+
+def _capture_outbound(monkeypatch):
+    """Stub the egress boundary and return the dict it records headers into.
+
+    Patched at `guarded_request`, which is the seam the tool actually calls.
+    These are credential tests: they prove the Authorization header is built
+    and the secret does not leak into the result. Destination checking is
+    deliberately out of scope here and is covered by its own suites.
+    """
     from runtime_tools import http_request_tools
 
-    captured = {}
+    captured: dict = {}
 
-    class _Resp:
-        status_code = 200
-        headers = {"Content-Type": "text/plain"}
-        text = "ok"
-
-    def fake_get(url, headers=None, timeout=None):
+    def fake(method, url, *, headers=None, data=None, timeout=None):
+        captured["method"] = method
+        captured["url"] = url
         captured["headers"] = headers
         return _Resp()
 
-    import requests
+    monkeypatch.setattr(http_request_tools, "guarded_request", fake)
+    return captured
 
-    monkeypatch.setattr(requests, "get", fake_get)
+
+def test_http_request_injects_the_resolved_token(env_secret, registry, monkeypatch):
+    from runtime_tools import http_request_tools
+
+    captured = _capture_outbound(monkeypatch)
     result = http_request_tools.http_request("https://example.com", auth_alias=env_secret)
 
     assert captured["headers"]["Authorization"] == f"Bearer {SECRET_VALUE}"
@@ -350,20 +365,7 @@ def test_http_request_injects_the_resolved_token(env_secret, registry, monkeypat
 def test_http_request_auth_scheme_is_honoured(env_secret, registry, monkeypatch):
     from runtime_tools import http_request_tools
 
-    captured = {}
-
-    class _Resp:
-        status_code = 200
-        headers = {}
-        text = "ok"
-
-    def fake_get(url, headers=None, timeout=None):
-        captured["headers"] = headers
-        return _Resp()
-
-    import requests
-
-    monkeypatch.setattr(requests, "get", fake_get)
+    captured = _capture_outbound(monkeypatch)
     http_request_tools.http_request("https://example.com", auth_alias=env_secret, auth_scheme="Token")
     assert captured["headers"]["Authorization"].startswith("Token ")
 
@@ -386,20 +388,7 @@ def test_http_request_unconfigured_alias_names_the_alias_not_the_value(registry)
 def test_http_request_without_auth_alias_is_unchanged(registry, monkeypatch):
     from runtime_tools import http_request_tools
 
-    captured = {}
-
-    class _Resp:
-        status_code = 200
-        headers = {}
-        text = "ok"
-
-    def fake_get(url, headers=None, timeout=None):
-        captured["headers"] = headers
-        return _Resp()
-
-    import requests
-
-    monkeypatch.setattr(requests, "get", fake_get)
+    captured = _capture_outbound(monkeypatch)
     http_request_tools.http_request("https://example.com")
     assert not (captured["headers"] or {}).get("Authorization")
 
