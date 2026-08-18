@@ -60,15 +60,37 @@ class BlockedDestinationError(Exception):
     """
 
 
-# Ranges `is_global` reports as globally routable that this tool must not
-# reach anyway. Each carries traffic somewhere else: 6to4 relay anycast is a
-# tunnel entry point, and both IPv6 forms below embed an IPv4 address that a
-# dual-stack host will happily deliver to.
+# Ranges denied by explicit membership rather than by `is_global` or the
+# category properties, because those verdicts move with the interpreter.
+#
+# CPython gh-113171 added `2002::/16` to the IPv6 private networks in 3.11.10 /
+# 3.12.4 / 3.13. On 3.11.9 `2002:7f00:1::` reports is_private False and
+# is_global True, so it was ALLOWED -- a 6to4 address embedding 127.0.0.1.
+# Caught by CI 2026-08-17 on windows-3.11 and windows-3.10, and only there:
+# 3.11.9 and 3.10.11 are the final Windows binary releases of those branches,
+# so those runners are frozen before the fix while the Linux runners track
+# current patches. The suite passed locally on 3.11.14 and on all four ubuntu
+# jobs, which is precisely how a version-dependent hole stays invisible.
+#
+# This is the same reasoning as `_effective_address` and it should have been
+# applied here at the same time: a classifier whose answer depends on the
+# interpreter is the same defect as one whose answer depends on the host OS.
+# Anything tunnelling, embedding, or otherwise special-purpose is listed --
+# not left to a property whose membership CPython may revise. The category
+# properties and `is_global` still run, as belt and braces, over the top.
 _EXTRA_DENIED = (
+    ipaddress.ip_network("100.64.0.0/10"),   # carrier-grade NAT
+    ipaddress.ip_network("192.0.0.0/24"),    # IETF protocol assignments
     ipaddress.ip_network("192.88.99.0/24"),  # 6to4 relay anycast
+    ipaddress.ip_network("198.18.0.0/15"),   # benchmarking
+    ipaddress.ip_network("240.0.0.0/4"),     # reserved for future use
+    ipaddress.ip_network("::/96"),           # IPv4-compatible IPv6 (deprecated)
     ipaddress.ip_network("64:ff9b::/96"),    # NAT64 well-known prefix
     ipaddress.ip_network("64:ff9b:1::/48"),  # NAT64 local-use prefix
-    ipaddress.ip_network("::/96"),           # IPv4-compatible IPv6 (deprecated)
+    ipaddress.ip_network("2001::/32"),       # Teredo -- tunnels over IPv4
+    ipaddress.ip_network("2002::/16"),       # 6to4 -- embeds an IPv4 address
+    ipaddress.ip_network("3ffe::/16"),       # 6bone, deprecated
+    ipaddress.ip_network("5f00::/8"),        # deprecated
 )
 
 # Most specific first. Several addresses satisfy more than one of these --
