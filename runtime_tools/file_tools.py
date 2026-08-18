@@ -18,6 +18,7 @@ from auro_runtime.paths import (
     get_policies_dir,
     get_workspace_root,
 )
+from auro_runtime.sensitive_paths import canonicalize_path, classify_workspace_relative
 from auro_runtime.tool_schemas import DeleteFileArgs, EchoArgs, ListDirArgs, ReadFileArgs, RestoreFileArgs, WriteFileArgs
 
 _BASE_DIR = None
@@ -87,11 +88,13 @@ _READ_BLOCKLIST_DIRS = frozenset({
     "__pycache__",
 })
 
-_READ_BLOCKLIST_FILES = frozenset({
-    ".env",
-    "auro_secrets.yaml",
-    ".auro_secrets.yaml",
-})
+# The sensitive-file inventory that used to sit here (`.env`, `auro_secrets.yaml`,
+# `.auro_secrets.yaml`) is gone. It was one of three hand-maintained copies that
+# drifted from each other, each reporting agreement with itself, so a credential
+# family added to the policy guard was still readable through this tool. The
+# single definition now lives in auro_runtime.sensitive_paths and this module
+# consumes it below. The lists that remain here are a different control family --
+# hygiene, not confidentiality -- and stay local deliberately.
 
 _READ_BLOCKLIST_PREFIXES = ()
 
@@ -111,28 +114,31 @@ def _is_read_blocked(p: Path, base: Path) -> str | None:
     if not parts:
         return None
 
-    # Strip trailing dots and spaces before comparing, on every component.
-    # Windows discards them when it opens the file, so `.env ` and `.env.` both
-    # reach the real `.env` while comparing unequal to it as strings.
+    # Normalisation comes from the shared canonicaliser rather than a copy kept
+    # here. This module used to carry its own, which is how the two enforcement
+    # layers ended up disagreeing about case on Linux -- that copy lowercased
+    # always, the guard's lowercased only under os.name == "nt". Two normalisers
+    # that must agree and have no mechanism forcing them to are one normaliser
+    # with a latent bug.
     #
-    # The directory loop below was already safe by accident: `parts` comes from
-    # p.resolve(), which normalises them away on Windows. The filename check was
-    # not, because it read `p.name` from the *unresolved* path -- so within this
-    # one function the two checks disagreed about which path they were judging.
-    # Confirmed live 2026-08-16: this returned None for `.env `, and the read
-    # that followed returned the real file's contents.
-    def _norm(s: str) -> str:
-        return (s.rstrip(" .") or s).lower()
-
-    name = _norm(p.name)
+    # Applied per component, on every platform. Windows discards trailing dots
+    # and spaces when it opens a file, so `.env ` and `.env.` both reach the
+    # real `.env` while comparing unequal to it as strings. Confirmed live
+    # 2026-08-16: this function returned None for `.env `, and the read that
+    # followed returned the real file's contents.
+    name = canonicalize_path(p.name)
 
     # Check every path component, not just the top one: a nested .git/, __pycache__/
     # or .auro_archive/ anywhere below the root must be blocked too.
     for part in parts:
-        if _norm(part) in _READ_BLOCKLIST_DIRS:
+        if canonicalize_path(part) in _READ_BLOCKLIST_DIRS:
             return f"Access to '{part}' is blocked."
 
-    if name in _READ_BLOCKLIST_FILES:
+    # Confidentiality, from the one shared inventory. `rel` is derived from
+    # p.resolve(), so the subject here is the file the filesystem will open --
+    # not the string the caller sent, which the policy guard judged earlier and
+    # which can differ whenever resolution does any work.
+    if classify_workspace_relative(rel) is not None:
         return f"Access to '{p.name}' is blocked (sensitive file)."
 
     if any(name.startswith(pf) for pf in _READ_BLOCKLIST_PREFIXES):

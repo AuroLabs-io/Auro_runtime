@@ -667,10 +667,40 @@ def test_trailing_dots_and_spaces_do_not_bypass_the_sensitive_path_guard(
 
 
 @pytest.mark.parametrize("path", [
+    "output/%2eenv",            # %2e is a percent-encoded dot
+    "output/%2Eenv",            # decoding is case-insensitive on the hex digit
+    "output/%2essh/id_rsa",
+])
+def test_percent_encoded_dots_do_not_bypass_the_sensitive_path_guard(
+    path, make_tool_call, enforceable_rules, registry
+):
+    """
+    The canonicaliser decodes `%2e` to a dot before matching. Nothing in the
+    filesystem tools percent-decodes, so on the read path this is deliberate
+    over-classification in the fail-closed direction (D-038) -- `output/%2eenv`
+    is a file legitimately named `%2eenv` and is refused as if it were `.env`.
+
+    It is not decoration. `url` is in `_PATH_ARG_KEYS`, and a URL genuinely is
+    percent-decoded before use, so a policy scoping this guard to `http_request`
+    would need the decode to see `.env` in an encoded path segment.
+
+    Added 2026-08-18 because a mutation deleting the decode survived: the
+    transformation had shipped since the guard was written with no test naming
+    it, which makes it indistinguishable from a line nobody would miss.
+    """
+    result = execute(make_tool_call("read_file", {"path": path}),
+                     allowed_tools={"read_file"}, policy_rules=enforceable_rules,
+                     run_history=[])
+    assert result.success is False, f"{path!r} was allowed"
+    assert "sensitive_paths" in result.error
+
+
+@pytest.mark.parametrize("path", [
     "output/envelope.txt",     # begins with env, is not .env
     "output/notes.txt",
     "output/report.final.md",  # interior dots are ordinary
     "output/.environment",     # longer name, not .env
+    "output/%252eenv",         # double-encoded: one pass must not reach .env
 ])
 def test_the_trailing_character_strip_does_not_over_block(
     path, make_tool_call, enforceable_rules, registry

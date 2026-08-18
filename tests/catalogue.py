@@ -38,6 +38,13 @@ FILE_PURPOSE = {
         "The executor's refusal pipeline: registry check, directive scope, argument "
         "schema, then policy guards across block/warn/advisory and "
         "fail_closed/fail_open.",
+    "test_sensitive_resource_classification.py":
+        "The single sensitive-resource inventory and both layers that consume it. "
+        "Covers that the policy guard and the file tool agree on every family and "
+        "category, that the tool classifies the resolved path rather than the "
+        "basename, and that normalisation is host-independent. Facts about this "
+        "repository's own inventory; the traversal and evasion corpora stay "
+        "restricted.",
     "test_credentials.py":
         "Alias resolution and delivery. The property under test throughout is that "
         "a resolved secret never appears in a tool result, an error message, or the "

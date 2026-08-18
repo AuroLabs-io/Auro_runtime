@@ -1,6 +1,6 @@
 # Test catalogue
 
-**294 test functions** across 12 files.
+**308 test functions** across 13 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -19,8 +19,9 @@ result in this repository depends on it.
 |---|---:|
 | [`tests/test_policy_validation.py`](../tests/test_policy_validation.py) | 30 |
 | [`tests/test_guard_bindings.py`](../tests/test_guard_bindings.py) | 15 |
-| [`tests/test_classifier_pins.py`](../tests/test_classifier_pins.py) | 10 |
-| [`tests/test_enforcement.py`](../tests/test_enforcement.py) | 42 |
+| [`tests/test_classifier_pins.py`](../tests/test_classifier_pins.py) | 11 |
+| [`tests/test_enforcement.py`](../tests/test_enforcement.py) | 43 |
+| [`tests/test_sensitive_resource_classification.py`](../tests/test_sensitive_resource_classification.py) | 12 |
 | [`tests/test_credentials.py`](../tests/test_credentials.py) | 38 |
 | [`tests/test_registry.py`](../tests/test_registry.py) | 35 |
 | [`tests/test_directives.py`](../tests/test_directives.py) | 23 |
@@ -29,7 +30,7 @@ result in this repository depends on it.
 | [`tests/test_audit_disclosure.py`](../tests/test_audit_disclosure.py) | 27 |
 | [`tests/test_archive_integrity.py`](../tests/test_archive_integrity.py) | 6 |
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 7 |
-| **Total** | **294** |
+| **Total** | **308** |
 
 ---
 
@@ -118,7 +119,7 @@ Every registered guard is bound by some policy rule, and every rule names a guar
 
 Law 10's enforcement: every caller-supplied locator argument is inspected or exempt on the record, and every security inventory declares whether it names places or matches secret values. A classifier that judges a string the filesystem or socket will read differently is the class these pin.
 
-10 tests.
+11 tests.
 
 ### TestLocatorArgumentsAreClassified
 
@@ -131,8 +132,9 @@ Law 10's enforcement: every caller-supplied locator argument is inspected or exe
 - **every security inventory is classified**
 - **classified inventories still exist** — Negative control: pinning names nothing defines proves nothing.
 - **every locator module declares how it obtains its subject**
-- **the shared canonicaliser is actually shared where claimed** — Every module declaring `shared` must really CALL it.
-- **the duplication is recorded and has not grown** — The honest half. This pin does not pretend the refactor happened.
+- **the shared classifier is actually shared where claimed** — Every module declaring `shared` must really CALL into it.
+- **no module grows its own normalisation** — The duplication must not come back, checked as a mechanism.
+- **the normalisation scan catches a private copy** — Negative control for the check above.
 - **the scan reports a new inventory** — Negative control for the scan.
 
 ---
@@ -141,7 +143,7 @@ Law 10's enforcement: every caller-supplied locator argument is inspected or exe
 
 The executor's refusal pipeline: registry check, directive scope, argument schema, then policy guards across block/warn/advisory and fail_closed/fail_open.
 
-42 tests.
+43 tests.
 
 - **unknown tool is refused**
 - **known tool with no restrictions succeeds**
@@ -184,7 +186,37 @@ The executor's refusal pipeline: registry check, directive scope, argument schem
 - **sensitive directories are blocked in bare and trailing slash forms** — The directory patterns required a trailing separator, and
 - **the sensitive path widening does not over block** — Control for the test above. Alternating the trailing separator with `$`
 - **trailing dots and spaces do not bypass the sensitive path guard** — Windows discards trailing dots and spaces when it opens a file, so
+- **percent encoded dots do not bypass the sensitive path guard** — The canonicaliser decodes `%2e` to a dot before matching. Nothing in the
 - **the trailing character strip does not over block** — Control for the test above. Stripping trailing dots and spaces must not
+
+---
+
+## `tests/test_sensitive_resource_classification.py`
+
+The single sensitive-resource inventory and both layers that consume it. Covers that the policy guard and the file tool agree on every family and category, that the tool classifies the resolved path rather than the basename, and that normalisation is host-independent. Facts about this repository's own inventory; the traversal and evasion corpora stay restricted.
+
+12 tests.
+
+### TestTheInventoryIsSharedNotCopied
+
+- **the guard and the read path agree on every family** — The defect this replaced was three lists disagreeing silently. The guard
+- **every family reports its category** — Categories exist because they reach the audit record. "Which class of
+### TestTheResolvedSubjectIsWiderThanTheBasename
+
+- **a plain name inside a credential directory is classified**
+- **the same plain names outside one are not** — Control. Without this, classifying everything would pass above.
+- **read file refuses a plain name inside a credential directory** — The property above, driven through the real tool rather than the
+- **read file still returns an ordinary neighbouring file** — Control for the test above, in the same directory tree.
+### TestNormalisationIsSharedAndHostIndependent
+
+- **case is folded on every platform** — Lowercasing used to happen only under `os.name == "nt"`, while the copy
+- **trailing dots and spaces are stripped**
+- **the strip is not a prefix match** — Control for the case above: normalisation must not widen matching.
+### TestUncontainedPathsFailClosed
+
+- **a path outside the base is refused with a reason** — Every caller contains before classifying, so being handed an uncontained
+- **a contained ordinary file is still permitted** — Control: fail-closed must not mean refuse-everything.
+- **the workspace ancestry is not judged** — Only the portion inside the workspace is the tool's subject. A workspace
 
 ---
 

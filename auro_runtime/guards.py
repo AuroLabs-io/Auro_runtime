@@ -4,8 +4,6 @@ Guards are pure functions that inspect a tool call and return a verdict.
 The executor runs applicable guards between arg validation and tool invocation.
 """
 
-import os
-import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -17,6 +15,7 @@ from auro_runtime.sanitization import (
     scrub_text,
     secret_kind,
 )
+from auro_runtime.sensitive_paths import classify_text
 
 
 @dataclass(frozen=True)
@@ -209,83 +208,46 @@ def check_no_secrets_in_args(ctx: GuardContext) -> GuardVerdict | None:
     return None
 
 
-# Directory patterns end with ([\\/]|$), not [\\/].
-#
-# Requiring a trailing separator meant these matched a file *inside* the
-# directory but not the directory itself, and `_canonicalize_path` normalises
-# through PurePosixPath, which strips a trailing separator the caller did
-# supply. So `.ssh/id_rsa` was blocked while `.ssh/`, `.ssh` and `.aws/` were
-# all allowed, and `list_dir` would happily enumerate them. Alternating with
-# `$` covers the bare form without loosening anything else: `.sshrc` still has
-# to fail, because a name merely starting with `.ssh` is not the directory.
-_SENSITIVE_PATH_PATTERNS = [
-    re.compile(r"(^|[\\/])\.env(\..*)?$", re.IGNORECASE),
-    re.compile(r"(^|[\\/])\.ssh([\\/]|$)", re.IGNORECASE),
-    re.compile(r"(^|[\\/])id_rsa", re.IGNORECASE),
-    re.compile(r"(^|[\\/])id_ed25519", re.IGNORECASE),
-    re.compile(r"(^|[\\/])\.credentials", re.IGNORECASE),
-    re.compile(r"(^|[\\/])auro_secrets\.yaml$", re.IGNORECASE),
-    re.compile(r"(^|[\\/])\.auro_secrets\.yaml$", re.IGNORECASE),
-    re.compile(r"(^|[\\/])\.gnupg([\\/]|$)", re.IGNORECASE),
-    re.compile(r"(^|[\\/])\.aws([\\/]|$)", re.IGNORECASE),
-    re.compile(r"(^|[\\/])credentials\.json$", re.IGNORECASE),
-    re.compile(r"(^|[\\/])\.htpasswd$", re.IGNORECASE),
-]
-
 _PATH_ARG_KEYS = frozenset({
     "path", "source_path", "dest_path",
     "restore_to", "url", "file_path", "directory",
 })
 
 
-def _canonicalize_path(p: str) -> str:
-    r"""
-    Normalize a path string for security comparison.
-
-    Trailing dots and spaces are stripped from every component, because Windows
-    strips them when it opens the file and this guard compares strings. Without
-    it, `output/.env ` did not match the `\.env(\..*)?$` pattern -- `$` cannot
-    follow a trailing space -- so the guard allowed the call and the filesystem
-    then opened the real `output/.env`. Confirmed live 2026-08-16: the read
-    returned the file's contents through this guard AND the tool's own
-    blocklist, which shared the same root cause. `.env.` behaved identically.
-
-    Applied on every platform, not only Windows. On Linux `.env ` and `.env` are
-    genuinely different files, so this over-classifies there by a hair: a file
-    deliberately named with a trailing space is refused as if it were the real
-    one. That is the fail-closed direction (D-038), it costs nothing real, and
-    the alternative is a classifier whose answer depends on the host OS -- the
-    same mistake as letting a resolver decide whether an SSRF destination is
-    refused.
-    """
-    p = p.replace("\\", "/")
-    p = re.sub(r"%2[eE]", ".", p)
-    try:
-        from pathlib import PurePosixPath
-        p = str(PurePosixPath(p))
-    except Exception:
-        pass
-    p = "/".join(part.rstrip(" .") or part for part in p.split("/"))
-    if os.name == "nt":
-        p = p.lower()
-    return p
-
-
 @register_guard("check_sensitive_paths")
 def check_sensitive_paths(ctx: GuardContext) -> GuardVerdict | None:
-    for key in _PATH_ARG_KEYS:
+    """
+    Refuse a tool call whose path arguments name a sensitive resource.
+
+    This is the earlier and weaker half of the pair. It judges the string the
+    model supplied, before anything is resolved, so it cannot see what
+    `directives/x.md` will open or where a manifest-derived restore will land.
+    The resolved subject is classified separately, inside the tools, against
+    this same inventory -- see auro_runtime.sensitive_paths for why the two
+    layers share an inventory but must not share how they obtain their subject.
+
+    Iteration is over a sorted key list rather than the frozenset directly.
+    Set order is not stable across interpreters, so when a call carried two
+    matching arguments the one named in the refusal message and the audit
+    record varied run to run -- a control whose evidence is nondeterministic is
+    harder to trust than one that always names the same argument.
+    """
+    for key in sorted(_PATH_ARG_KEYS):
         val = ctx.args.get(key) or ctx.raw_args.get(key)
         if not val or not isinstance(val, str):
             continue
-        canonical = _canonicalize_path(val)
-        for pattern in _SENSITIVE_PATH_PATTERNS:
-            if pattern.search(canonical):
-                return GuardVerdict(
-                    allowed=False,
-                    message=f"Path argument '{key}' matches sensitive pattern.",
-                    code="sensitive_path",
-                    metadata={"key": key, "pattern": pattern.pattern},
-                )
+        match = classify_text(val)
+        if match is not None:
+            return GuardVerdict(
+                allowed=False,
+                message=f"Path argument '{key}' matches sensitive pattern.",
+                code="sensitive_path",
+                metadata={
+                    "key": key,
+                    "pattern": match.pattern,
+                    "category": match.category,
+                },
+            )
     return None
 
 

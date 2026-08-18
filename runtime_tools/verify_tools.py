@@ -27,6 +27,7 @@ from pathlib import Path
 import yaml
 
 from auro_runtime.paths import get_source_checkout_root
+from auro_runtime.sensitive_paths import classify_text
 
 _PROJECT_ROOT = None
 
@@ -581,7 +582,16 @@ _SECRET_PATTERNS = [
     )),
 ]
 
-_SENSITIVE_FILES = {".env", "auro_secrets.yaml", ".auro_secrets.yaml"}
+# The sensitive-file inventory that used to sit here -- `.env`,
+# `auro_secrets.yaml`, `.auro_secrets.yaml` -- was the third hand-maintained
+# copy of a list that also lived in the policy guard and the file tool, all
+# three drifting independently. It is gone; this check consumes the single
+# definition in auro_runtime.sensitive_paths.
+#
+# That is a widening as well as a deduplication. The old check compared the
+# *basename* exactly and case-sensitively, so a staged `.ssh/id_rsa` -- a
+# private key, the thing this check exists to stop reaching a commit -- passed
+# it. Classifying the repo-relative path catches the directory families too.
 
 
 def verify_security() -> dict:
@@ -656,11 +666,12 @@ def verify_security() -> dict:
                 continue
             status = line[:2]
             filepath = line[3:].strip().strip('"')
-            filename = Path(filepath).name
-            if filename in _SENSITIVE_FILES and status[0] in ("A", "M"):
+            match = classify_text(filepath)
+            if match is not None and status[0] in ("A", "M"):
                 staged_sensitive.append(_make_finding(
                     "error", "SENSITIVE_FILE_STAGED",
-                    f"Sensitive file staged for commit", file=filepath,
+                    f"Sensitive file staged for commit ({match.category})",
+                    file=filepath,
                 ))
 
         if staged_sensitive:

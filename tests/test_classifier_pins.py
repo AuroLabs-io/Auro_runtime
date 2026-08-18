@@ -177,9 +177,16 @@ class TestLocatorArgumentsAreClassified:
 # ---------------------------------------------------------------------------
 
 # Modules that classify a caller-supplied locator, or hold an inventory used to.
+#
+# sensitive_paths.py joined this tuple when it became the single definition on
+# 2026-08-18. Adding the module here is not bookkeeping: every check below
+# iterates this tuple, so an inventory in a module absent from it is unscanned
+# and every pin still passes. A silent pin is worse than no pin, because the
+# green run is read as evidence.
 _CLASSIFIER_MODULES = (
     "auro_runtime/guards.py",
     "auro_runtime/egress.py",
+    "auro_runtime/sensitive_paths.py",
     "runtime_tools/file_tools.py",
     "runtime_tools/verify_tools.py",
 )
@@ -195,7 +202,7 @@ _INVENTORY_NAME = re.compile(
 # make it, and getting it wrong in the CONTENT direction is how a locator
 # inventory would slip in unexamined.
 _INVENTORY_KIND = {
-    "auro_runtime/guards.py::_SENSITIVE_PATH_PATTERNS": "LOCATOR",
+    "auro_runtime/sensitive_paths.py::_SENSITIVE_RESOURCES": "LOCATOR",
     "auro_runtime/guards.py::_PATH_ARG_KEYS": "LOCATOR",
     "auro_runtime/guards.py::_REDACT_KEYS": "CONTENT",
     "auro_runtime/guards.py::_SECRET_PATTERNS": "CONTENT",
@@ -203,32 +210,46 @@ _INVENTORY_KIND = {
     "auro_runtime/egress.py::_EXTRA_DENIED": "LOCATOR",
     "runtime_tools/file_tools.py::_PROTECTED_PATTERNS": "LOCATOR",
     "runtime_tools/file_tools.py::_READ_BLOCKLIST_DIRS": "LOCATOR",
-    "runtime_tools/file_tools.py::_READ_BLOCKLIST_FILES": "LOCATOR",
     "runtime_tools/file_tools.py::_READ_BLOCKLIST_PREFIXES": "LOCATOR",
     "runtime_tools/file_tools.py::_READ_BLOCKLIST_SUFFIXES": "LOCATOR",
-    "runtime_tools/verify_tools.py::_SENSITIVE_FILES": "LOCATOR",
     "runtime_tools/verify_tools.py::_SANITIZED_ENV_KEYS": "CONTENT",
     "runtime_tools/verify_tools.py::_SECRET_PATTERNS": "CONTENT",
 }
 
 # How each module carrying a LOCATOR inventory obtains the subject it judges.
-# This records the state as it is, not as it should be.
 #
-#   shared   -- consumes auro_runtime.guards._canonicalize_path
+#   owner    -- defines the shared inventory and canonicaliser
+#   shared   -- consumes auro_runtime.sensitive_paths rather than its own copy
 #   resolved -- judges a resolved subject, so no string normalisation applies
-#   inline   -- carries its own normalisation. OPEN. Law 15b's practice calls
-#               for one shared canonicaliser both layers consume deliberately;
-#               this is the duplication the shared-canonicalisation refactor
-#               exists to close, tracked on
-#               OT-sensitive-resource-inventory-is-duplicated-across-three-modules.
+#
+# The `inline` state -- a module carrying its own normalisation -- was retired
+# on 2026-08-18 when the shared-canonicalisation refactor landed. Three copies
+# of the sensitive-file inventory became one, and the two modules that had
+# their own trailing-dot-and-space normalisation now consume the shared
+# canonicaliser. If `inline` ever needs reintroducing, the thing to write is a
+# mechanism forcing the copies to agree, not a second declaration.
 _LOCATOR_SUBJECT = {
+    "auro_runtime/sensitive_paths.py": "owner",
     "auro_runtime/guards.py": "shared",
     "auro_runtime/egress.py": "resolved",
-    "runtime_tools/file_tools.py": "inline",
-    "runtime_tools/verify_tools.py": "inline",
+    "runtime_tools/file_tools.py": "shared",
+    "runtime_tools/verify_tools.py": "shared",
 }
 
-_NORMALISATION_STILL_DUPLICATED = {"runtime_tools/file_tools.py", "runtime_tools/verify_tools.py"}
+# The public entry points of the shared module. A module declaring `shared`
+# must call at least one of them.
+_SHARED_CLASSIFIER_API = frozenset({
+    "canonicalize_path",
+    "classify_text",
+    "classify_workspace_relative",
+    "classify_resolved",
+})
+
+# The signature of the duplicated normalisation this refactor removed: stripping
+# trailing dots and spaces off a path component by hand. Only the owner may do
+# it. See test_no_module_grows_its_own_normalisation for why this is checked as
+# a mechanism rather than declared in the table above.
+_NORMALISATION_SIGNATURE = 'rstrip(" .")'
 
 
 def _module_inventories(repo_root, module: str) -> set[str]:
@@ -291,51 +312,85 @@ class TestLocatorClassifiersAreInventoried:
             f"normalisation -- law 10 is about which of those it is."
         )
 
-    def test_the_shared_canonicaliser_is_actually_shared_where_claimed(self, repo_root):
-        """Every module declaring `shared` must really CALL it.
+    def test_the_shared_classifier_is_actually_shared_where_claimed(self, repo_root):
+        """Every module declaring `shared` must really CALL into it.
 
         Deliberately an AST walk for call sites rather than a substring search.
         A substring search passes on the function's own `def` line, so removing
         every call in guards.py left this green -- caught by mutation 2026-08-17,
         and precisely the "declaration is not a mechanism" failure this test
         exists to prevent, committed inside the test meant to prevent it.
+
+        Both call shapes count. A module importing the name and calling
+        `classify_text(...)` produces an ast.Name; one calling
+        `sensitive_paths.classify_text(...)` produces an ast.Attribute. Matching
+        only the first would let the second style silently fail the pin while
+        the code was correct -- and, worse, would let someone satisfy the pin by
+        changing an import rather than by consuming the shared module.
         """
         for module, subject in _LOCATOR_SUBJECT.items():
             if subject != "shared":
                 continue
             tree = ast.parse((repo_root / module).read_text(encoding="utf-8"))
-            calls = {
-                node.func.id
-                for node in ast.walk(tree)
-                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-            }
-            assert "_canonicalize_path" in calls, (
-                f"{module} is declared as using the shared canonicaliser but "
-                f"contains no call to it. A declaration is not a mechanism."
+            calls = set()
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                if isinstance(node.func, ast.Name):
+                    calls.add(node.func.id)
+                elif isinstance(node.func, ast.Attribute):
+                    calls.add(node.func.attr)
+            assert calls & _SHARED_CLASSIFIER_API, (
+                f"{module} is declared as consuming the shared classifier but "
+                f"calls none of {sorted(_SHARED_CLASSIFIER_API)}. A declaration "
+                f"is not a mechanism."
             )
 
-    def test_the_duplication_is_recorded_and_has_not_grown(self, repo_root):
-        """The honest half. This pin does not pretend the refactor happened.
+    def test_no_module_grows_its_own_normalisation(self, repo_root):
+        """The duplication must not come back, checked as a mechanism.
 
-        `_canonicalize_path` has exactly one consumer today; file_tools.py
-        carries its own copy of the trailing-dot-and-space normalisation, and
-        verify_tools.py compares exact names with none. That is law 15b's
-        "two layers sharing an assumption" still open, and it is tracked on
-        OT-sensitive-resource-inventory-is-duplicated-across-three-modules.
+        Until 2026-08-18 this pin asserted a hand-maintained set of modules
+        carrying their own normalisation had not grown. That was a declaration
+        about a declaration: the table it read was written by hand, so a module
+        that grew a private copy failed only if someone also remembered to
+        record it. The refactor that emptied the set is the right moment to
+        replace it with something that reads the source.
 
-        What this asserts is that the set has not GROWN. A third module
-        growing its own normalisation fails here. Doing the refactor also
-        fails here -- deliberately -- because shrinking the set should require
-        someone to come back and retire this pin rather than leave it
-        describing a problem that no longer exists (law 16b).
+        The duplicated normalisation had one recognisable signature -- stripping
+        trailing dots and spaces off a path component by hand. Only the module
+        that owns the canonicaliser may do that. Anywhere else it means a second
+        copy of the assumption, which is how the two layers came to disagree
+        about case on Linux while both looking correct in isolation.
         """
-        actual = {m for m, subject in _LOCATOR_SUBJECT.items() if subject == "inline"}
-        assert actual == _NORMALISATION_STILL_DUPLICATED, (
-            f"the set of modules carrying their own locator normalisation "
-            f"changed: expected {sorted(_NORMALISATION_STILL_DUPLICATED)}, found "
-            f"{sorted(actual)}. If it grew, a new layer is repeating an "
-            f"assumption instead of consuming the shared canonicaliser. If it "
-            f"shrank, the refactor landed -- update this pin and the card."
+        owners = {m for m, subject in _LOCATOR_SUBJECT.items() if subject == "owner"}
+        offenders = sorted(
+            module
+            for module in _CLASSIFIER_MODULES
+            if module not in owners
+            and _NORMALISATION_SIGNATURE in (repo_root / module).read_text(encoding="utf-8")
+        )
+        assert offenders == [], (
+            f"module(s) carrying their own path normalisation: {offenders}. "
+            f"The shared canonicaliser exists so the layers cannot disagree; a "
+            f"private copy reintroduces exactly the divergence that let "
+            f"`output/.env ` through both enforcement layers on 2026-08-16. "
+            f"Consume auro_runtime.sensitive_paths instead."
+        )
+
+    def test_the_normalisation_scan_catches_a_private_copy(self, repo_root):
+        """Negative control for the check above.
+
+        With no module currently carrying a private copy, the assertion passes
+        whether or not the scan reads anything at all. This drives the real
+        check over a mutated copy of a real module and requires it to object.
+        """
+        module = "runtime_tools/file_tools.py"
+        mutated = (repo_root / module).read_text(encoding="utf-8") + (
+            '\ndef _sneaky_norm(s):\n    return (s.rstrip(" .") or s).lower()\n'
+        )
+        assert _NORMALISATION_SIGNATURE in mutated, (
+            "the scan did not see a private normalisation added to "
+            f"{module}. The pin cannot catch what it cannot see."
         )
 
     def test_the_scan_reports_a_new_inventory(self, repo_root):
