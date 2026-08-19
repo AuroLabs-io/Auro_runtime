@@ -1,6 +1,6 @@
 # Audit event catalogue
 
-**26 event names** are emitted by the runtime.
+**27 event names** are emitted by the runtime.
 
 Generated from the `write_audit_event` call sites by
 `python -m tests.audit_catalogue`. Do not edit by hand.
@@ -37,6 +37,7 @@ a guard that approves returns `None` and writes nothing.
 | `policy_guard_error` | `auro_runtime/executor.py` | `directive_id`, `error`, `guard`, `on_error`, `rule_id`, `tool` |
 | `policy_guard_missing` | `auro_runtime/executor.py` | `directive_id`, `error`, `guard`, `on_error`, `rule_id`, `tool` |
 | `policy_validation_failed` | `auro_runtime/orchestrator.py` | `directive_id`, `error` |
+| `resource_classification` | `auro_runtime/resource_plan.py` | `category`, `directive_id`, `origin`, `outcome`, `role`, `subjects`, `tool` |
 | `router_backend_error` | `auro_runtime/orchestrator.py` | `error` |
 | `tool_execution_error` | `auro_runtime/executor.py` | `args`, `directive_id`, `error`, `reason`, `tool` |
 | `tool_not_allowed` | `auro_runtime/executor.py` | `allowed_tools`, `directive_id`, `error`, `reason`, `tool` |

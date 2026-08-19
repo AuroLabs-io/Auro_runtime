@@ -22,6 +22,7 @@ defeating path validation in general. The traversal and evasion corpora stay in
 the restricted pack.
 """
 
+import json
 import os
 from pathlib import Path
 
@@ -34,7 +35,8 @@ from auro_runtime.sensitive_paths import (
     classify_text,
     classify_workspace_relative,
 )
-from runtime_tools.file_tools import read_file
+from runtime_tools import file_tools
+from runtime_tools.file_tools import delete_file, read_file, restore_file, write_file
 
 
 @pytest.fixture
@@ -71,6 +73,50 @@ def workspace_probe(repo_root: Path):
     for d in sorted(created_dirs, key=lambda p: len(p.parts), reverse=True):
         if d.is_dir() and not any(d.iterdir()):
             d.rmdir()
+
+
+@pytest.fixture(autouse=True)
+def archive_probe():
+    """Restore `.auro_archive/` to exactly the state each test found it in.
+
+    Autouse deliberately. Only some tests touch the archive, but which ones is
+    not knowable in advance: a regression in any refusal turns a tool that was
+    supposed to decline into one that archives a file, and the debris then
+    breaks a later test's baseline rather than the failing one's. Relying on
+    each author to remember the fixture is the same hand-maintained-list
+    problem this suite exists to close.
+
+    `.auro_archive/manifest.jsonl` is append-only and shared, so a test that
+    writes a row must put the file back exactly as it found it -- including the
+    case where it did not exist at all -- or it leaves a ledger row for an
+    archive blob that is gone.
+    """
+    archive_dir = file_tools._get_archive_dir()
+    manifest = archive_dir / "manifest.jsonl"
+    before = manifest.read_text(encoding="utf-8") if manifest.exists() else None
+    existing = {p.name for p in archive_dir.iterdir()} if archive_dir.is_dir() else set()
+
+    def _register(archive_name: str) -> str:
+        return archive_name
+
+    yield _register
+
+    # Snapshot-and-restore rather than removing registered names. Under a
+    # mutation that disables the classification, delete_file succeeds and
+    # archives the file under a timestamped name the test never learns, so a
+    # register-by-name fixture cannot clean it and the debris then breaks the
+    # *next* mutation's control run. Removing whatever is new is robust to the
+    # tool under test actually working.
+    if archive_dir.is_dir():
+        for p in archive_dir.iterdir():
+            if p.name not in existing:
+                p.unlink(missing_ok=True)
+    if before is None:
+        manifest.unlink(missing_ok=True)
+    else:
+        manifest.write_text(before, encoding="utf-8")
+    if archive_dir.is_dir() and not any(archive_dir.iterdir()):
+        archive_dir.rmdir()
 
 
 class TestTheInventoryIsSharedNotCopied:
@@ -263,6 +309,172 @@ class TestFilesystemAliasesAreResolvedBeforeClassification:
         assert classify_resolved(alias, base) is not None, (
             f"{alias} resolves into .ssh/ and was not classified"
         )
+
+
+class TestEveryMutatingToolClassifiesItsResolvedTarget:
+    """The half a pre-execution guard structurally cannot reach.
+
+    `check_sensitive_paths` inspects caller arguments. For `restore_file` with
+    `restore_to` omitted there are no relevant caller arguments -- the
+    destination is read out of the archive manifest -- so the guard finds
+    nothing to look at and approves by having no opinion. Containment and
+    writability were enforced; sensitivity was enforced by nobody.
+    """
+
+    @staticmethod
+    def _plant_archive(rel_original: str, blob: str = "SECRET=probe\n") -> str:
+        """Plant an archive entry and its manifest row without using delete_file.
+
+        delete_file now classifies its target too, so a sensitive file cannot be
+        archived through it. Archives predating this change, and those produced
+        by `write_file` overwriting an existing file, still exist -- so planting
+        the state directly is the faithful reproduction, not a contrivance.
+        """
+        archive_dir = file_tools._get_archive_dir()
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        archive_name = "20260818_000000__" + "__".join(Path(rel_original).parts)
+        (archive_dir / archive_name).write_text(blob, encoding="utf-8")
+        manifest = archive_dir / "manifest.jsonl"
+        with open(manifest, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "original_path": str(Path(rel_original)),
+                "archive_path": archive_name,
+                "deleted_at": "2026-08-18T00:00:00+00:00",
+                "size_bytes": len(blob),
+            }) + "\n")
+        return archive_name
+
+    def test_a_manifest_derived_destination_is_refused(self, archive_probe):
+        """The card's gap 3, and the remaining ship blocker before this landed."""
+        archive_name = archive_probe(
+            self._plant_archive("output/.env", "SENTINEL_NOT_RESTORED=1\n")
+        )
+
+        result = restore_file(archive_name=archive_name)
+
+        assert result.get("restored") is False, result
+        assert "blocked" in result.get("error", "")
+        # Assert the content was not materialised rather than that the path is
+        # absent. A developer may legitimately have their own output/.env, and a
+        # test that fails because of it is testing the machine, not the code.
+        dest = file_tools._get_base_dir() / "output" / ".env"
+        if dest.exists():
+            assert "SENTINEL_NOT_RESTORED" not in dest.read_text(encoding="utf-8"), (
+                "the destination was refused but the archived content was written anyway"
+            )
+
+    def test_an_ordinary_manifest_derived_destination_still_restores(
+        self, archive_probe, workspace_probe
+    ):
+        """Positive control. Refusing everything would pass the test above."""
+        workspace_probe("output/.keep", "hold the directory\n")
+        archive_name = archive_probe(
+            self._plant_archive("output/restored_notes.txt", "ordinary\n")
+        )
+        restored = file_tools._get_base_dir() / "output" / "restored_notes.txt"
+        try:
+            result = restore_file(archive_name=archive_name)
+            assert result.get("restored") is True, result
+            assert restored.read_text(encoding="utf-8") == "ordinary\n"
+        finally:
+            restored.unlink(missing_ok=True)
+
+    def test_an_explicit_sensitive_restore_destination_is_refused(self, archive_probe):
+        archive_name = archive_probe(
+            self._plant_archive("output/restored_notes.txt", "ordinary\n")
+        )
+
+        result = restore_file(archive_name=archive_name, restore_to="output/.env")
+
+        assert result.get("restored") is False, result
+        assert "blocked" in result.get("error", "")
+
+    def test_write_file_refuses_a_sensitive_destination(self):
+        result = write_file(path="output/.env", content="SENTINEL_NOT_WRITTEN=1\n")
+
+        assert result.get("written") is False, result
+        assert "blocked" in result.get("error", "")
+        dest = file_tools._get_base_dir() / "output" / ".env"
+        if dest.exists():
+            assert "SENTINEL_NOT_WRITTEN" not in dest.read_text(encoding="utf-8"), (
+                "write_file reported a refusal and wrote the content anyway"
+            )
+
+    def test_write_file_still_writes_an_ordinary_neighbour(self):
+        target = file_tools._get_base_dir() / "output" / "plain_probe.txt"
+        try:
+            result = write_file(path="output/plain_probe.txt", content="fine\n")
+            assert result.get("written") is True, result
+        finally:
+            target.unlink(missing_ok=True)
+
+    def test_delete_file_refuses_a_sensitive_target(self, workspace_probe):
+        rel = workspace_probe("output/.env", "SECRET=probe\n")
+
+        result = delete_file(path=rel)
+
+        assert result.get("deleted") is False, result
+        assert "blocked" in result.get("error", "")
+        assert (file_tools._get_base_dir() / rel).exists(), (
+            "the delete was refused but the file is gone"
+        )
+
+
+class TestTheAuditDistinguishesApprovedFromNeverRan:
+    """The close condition's evidence clause.
+
+    Before this, a guard that approved returned None and wrote nothing, so an
+    operator asking "was this control active during the incident" got the same
+    silence whether it approved or never ran at all.
+    """
+
+    def test_an_approval_is_recorded(self, audit_events, workspace_probe):
+        rel = workspace_probe("output/audited_probe.txt", "ordinary\n")
+
+        read_file(path=rel)
+
+        events = [e for e in audit_events if e.get("event") == "resource_classification"]
+        assert len(events) == 1, events
+        assert events[0]["outcome"] == "approved"
+        assert events[0]["tool"] == "read_file"
+
+    def test_a_refusal_is_recorded_with_its_category_and_origin(
+        self, audit_events, archive_probe
+    ):
+        archive_name = archive_probe(self._plant())
+
+        restore_file(archive_name=archive_name)
+
+        events = [e for e in audit_events if e.get("event") == "resource_classification"]
+        assert len(events) == 1, events
+        assert events[0]["outcome"] == "refused"
+        assert events[0]["category"] == "env_file"
+        assert events[0]["origin"] == "manifest", (
+            "the record must say the destination came from the manifest rather "
+            "than from a caller argument -- that distinction is the finding"
+        )
+        assert events[0]["role"] == "destination"
+
+    @staticmethod
+    def _plant():
+        return TestEveryMutatingToolClassifiesItsResolvedTarget._plant_archive("output/.env")
+
+    def test_the_recorded_subject_is_workspace_relative(
+        self, audit_events, workspace_probe
+    ):
+        """An absolute path carries the operator's directory layout off the box.
+
+        `file_restored` was corrected for exactly this on 2026-08-08; a new
+        event repeating it would reintroduce a closed defect.
+        """
+        rel = workspace_probe("output/audited_probe.txt", "ordinary\n")
+
+        read_file(path=rel)
+
+        event = next(e for e in audit_events if e.get("event") == "resource_classification")
+        recorded = event["subjects"][0]["path"]
+        assert recorded == "output/audited_probe.txt", recorded
+        assert ":" not in recorded and not recorded.startswith("/")
 
 
 class TestNormalisationIsSharedAndHostIndependent:

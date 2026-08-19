@@ -18,6 +18,15 @@ from auro_runtime.paths import (
     get_policies_dir,
     get_workspace_root,
 )
+from auro_runtime.resource_plan import (
+    ARGUMENT,
+    DESTINATION,
+    MANIFEST,
+    SOURCE,
+    ResourcePlan,
+    ResourceSubject,
+    check_resource_plan,
+)
 from auro_runtime.sensitive_paths import canonicalize_path, classify_workspace_relative
 from auro_runtime.tool_schemas import DeleteFileArgs, EchoArgs, ListDirArgs, ReadFileArgs, RestoreFileArgs, WriteFileArgs
 
@@ -209,6 +218,15 @@ def list_dir(path: str, recursive: bool = False) -> dict:
     p, base = _resolve_read_path(path)
     if not _path_under_base(p, base):
         return {"error": "Path is outside the allowed project directory.", "entries": []}
+    # Submitted for the directory itself only, not per entry: _is_read_blocked
+    # filters children below, and auditing a recursive listing per child would
+    # bury the record this event exists to make findable.
+    plan_err = check_resource_plan(ResourcePlan(
+        tool="list_dir",
+        subjects=(ResourceSubject(resolved=p, base=base, role=SOURCE),),
+    ))
+    if plan_err:
+        return {"error": plan_err, "entries": []}
     blocked = _is_read_blocked(p, base)
     if blocked:
         return {"error": blocked, "entries": []}
@@ -240,6 +258,12 @@ def read_file(path: str, encoding: str = "utf-8") -> dict:
     p, base = _resolve_read_path(path)
     if not _path_under_base(p, base):
         return {"error": "Path is outside the allowed project directory.", "content": None}
+    plan_err = check_resource_plan(ResourcePlan(
+        tool="read_file",
+        subjects=(ResourceSubject(resolved=p, base=base, role=SOURCE),),
+    ))
+    if plan_err:
+        return {"error": plan_err, "content": None}
     blocked = _is_read_blocked(p, base)
     if blocked:
         return {"error": blocked, "content": None}
@@ -320,6 +344,15 @@ def write_file(path: str, content: str, encoding: str = "utf-8") -> dict:
     write_err = _is_writable_path(p, base)
     if write_err:
         return {"error": write_err, "written": False}
+
+    # Sensitivity, on the resolved target. Containment and writability answer
+    # "may this location be written"; neither answers "is this a credential".
+    plan_err = check_resource_plan(ResourcePlan(
+        tool="write_file",
+        subjects=(ResourceSubject(resolved=p, base=base, role=DESTINATION),),
+    ))
+    if plan_err:
+        return {"error": plan_err, "written": False}
 
     backed_up = None
     if p.exists() and p.is_file():
@@ -522,6 +555,13 @@ def delete_file(path: str) -> dict:
     if protected:
         return {"error": protected, "deleted": False}
 
+    plan_err = check_resource_plan(ResourcePlan(
+        tool="delete_file",
+        subjects=(ResourceSubject(resolved=p, base=base, role=SOURCE),),
+    ))
+    if plan_err:
+        return {"error": plan_err, "deleted": False}
+
     if not _is_in_allowlisted_dir(p, base):
         try:
             rel = p.resolve().relative_to(base)
@@ -586,6 +626,7 @@ def restore_file(archive_name: str, restore_to: str | None = None) -> dict:
         return {"error": f"Archive file not found: {archive_name}", "restored": False}
 
     if restore_to:
+        dest_origin = ARGUMENT
         dest = (base / restore_to).resolve() if not Path(restore_to).is_absolute() else Path(restore_to).resolve()
         if not _path_under_base(dest, base):
             return {"error": "Restore path is outside the allowed project directory.", "restored": False}
@@ -595,6 +636,7 @@ def restore_file(archive_name: str, restore_to: str | None = None) -> dict:
         if not_writable:
             return {"error": not_writable, "restored": False}
     else:
+        dest_origin = MANIFEST
         manifest_path = archive_dir / "manifest.jsonl"
         if not manifest_path.exists():
             return {"error": "No manifest found. Provide restore_to path explicitly.", "restored": False}
@@ -635,6 +677,27 @@ def restore_file(archive_name: str, restore_to: str | None = None) -> dict:
         not_writable = _is_writable_path(dest, base)
         if not_writable:
             return {"error": not_writable, "restored": False}
+
+    # Classify the destination in BOTH branches. The manifest-derived one is the
+    # case the policy guard structurally cannot reach: with restore_to omitted,
+    # no caller argument contributes to `dest`, so an argument-inspecting guard
+    # finds nothing to look at and approves by having no opinion. Restoring an
+    # archived `.env` back into the workspace was the concrete instance.
+    #
+    # The archive entry itself is deliberately NOT a subject. `archive_name` is
+    # exempt from inspection on the record, and the reason applies exactly here:
+    # it names an entry inside the archive, its containment is separately
+    # mutation-proved through _path_under_base above, and classifying it would
+    # refuse restoring a file the operator legitimately deleted. Source
+    # contained, destination classified -- the composition is the control.
+    plan_err = check_resource_plan(ResourcePlan(
+        tool="restore_file",
+        subjects=(ResourceSubject(
+            resolved=dest, base=base, role=DESTINATION, origin=dest_origin,
+        ),),
+    ))
+    if plan_err:
+        return {"error": plan_err, "restored": False}
 
     if dest.exists():
         return {

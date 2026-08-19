@@ -16,6 +16,7 @@ from auro_runtime.sanitization import (
     sanitize_value,
     scrub_text,
 )
+from auro_runtime.resource_plan import policy_context
 from auro_runtime.schemas import PERMISSIVE_ENFORCEMENT, ToolCallOutput, ToolCallResult
 
 logger = logging.getLogger("auro_runtime.executor")
@@ -380,7 +381,11 @@ def execute(
                     )
 
     try:
-        result = fn(**args_to_use)
+        # Carries the directive id into the tools' own resolved-resource check,
+        # which runs after they resolve and cannot otherwise attribute a refusal
+        # to a run. It sets no verdict -- see auro_runtime.resource_plan.
+        with policy_context(directive_id):
+            result = fn(**args_to_use)
         safe_result = sanitize_value(result)
         tool_error = _tool_reported_error(safe_result)
         if tool_error is not None:
