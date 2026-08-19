@@ -583,6 +583,23 @@ _note: Only one direction of the guard check runs in the security phase. It catc
 
 ---
 
+### Commit-bound release evidence
+
+`release_evidence.py` is the publication-candidate gate. It is a root-level operator script rather than a runtime tool, so it can report on a checkout even when the runtime package does not import. Install the development and release dependencies, then name the full commit that the candidate must come from:
+
+```bash
+pip install -e ".[dev]" twine
+python -B release_evidence.py \
+  --expected-commit "$(git rev-parse HEAD)" \
+  --output-dir dist
+```
+
+The command refuses unless the supplied 40-character id is `HEAD`, the index tree equals that commit's tree, and `git status --porcelain --untracked-files=all` is empty. It exports that commit with `git archive`, builds one wheel and one sdist from the export, runs `twine check`, and drives the mandatory distribution matrix against those exact artifacts. A successful output directory contains the wheel, the sdist, and `release-evidence.json`; the record binds their filenames, sizes, and SHA-256 digests to the commit, commit/index tree ids, toolchain versions, clean-before-and-after state, and a non-zero pytest count.
+
+CI supplies GitHub's workflow commit as `--expected-commit` and retains the three files together. The retained candidate is evidence for that workflow identity; it is not evidence for an artifact rebuilt later from a local checkout.
+
+---
+
 ## Tests
 
 ```bash

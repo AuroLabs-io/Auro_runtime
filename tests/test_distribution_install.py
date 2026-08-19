@@ -134,6 +134,7 @@ print(json.dumps({
 @dataclass(frozen=True)
 class BuiltDistribution:
     wheel: Path
+    sdist: Path | None
     wheelhouse: Path
     sha256: str
     source_copy: Path
@@ -164,6 +165,7 @@ class InstalledDistribution:
             "AURO_ALLOW_NO_POLICIES",
             "AURO_POLICY_PROFILE",
             "AURO_MCP_ALLOWED_DIRECTIVE_IDS",
+            "AURO_DISTRIBUTION_DIR",
         ):
             env.pop(key, None)
         env["PYTHONNOUSERSITE"] = "1"
@@ -330,6 +332,18 @@ def built_distribution(
     )
     assert not (source_copy / _AUDIT_FILENAME).exists()
 
+    supplied_dir_raw = os.environ.get("AURO_DISTRIBUTION_DIR")
+    supplied_wheel = None
+    supplied_sdist = None
+    if supplied_dir_raw:
+        supplied_dir = Path(supplied_dir_raw).resolve()
+        supplied_wheels = sorted(supplied_dir.glob("auro_runtime-*.whl"))
+        supplied_sdists = sorted(supplied_dir.glob("auro_runtime-*.tar.gz"))
+        assert len(supplied_wheels) == 1, supplied_wheels
+        assert len(supplied_sdists) == 1, supplied_sdists
+        supplied_wheel = supplied_wheels[0]
+        supplied_sdist = supplied_sdists[0]
+
     proc = subprocess.run(
         [
             sys.executable,
@@ -362,8 +376,18 @@ def built_distribution(
         f"expected one exact auro-runtime wheel, found: {project_wheels}"
     )
     wheel = project_wheels[0]
+    if supplied_wheel is not None:
+        # Keep the dependency wheelhouse produced above, but replace the locally
+        # built project wheel with the exact publication candidate. Every install
+        # and probe below therefore exercises the candidate named by the evidence
+        # record, while remaining independent of package-index access.
+        shutil.copy2(supplied_wheel, wheel)
+        assert hashlib.sha256(wheel.read_bytes()).digest() == hashlib.sha256(
+            supplied_wheel.read_bytes()
+        ).digest()
     return BuiltDistribution(
         wheel=wheel,
+        sdist=supplied_sdist,
         wheelhouse=wheelhouse,
         sha256=hashlib.sha256(wheel.read_bytes()).hexdigest(),
         source_copy=source_copy,
@@ -515,27 +539,31 @@ def test_sdist_excludes_tests_and_builds_the_same_authority_set(
     sdist_dir.mkdir()
     rebuilt_dir.mkdir()
 
-    built = subprocess.run(
-        [
-            sys.executable,
-            "-B",
-            "-m",
-            "build",
-            "--sdist",
-            "--no-isolation",
-            "--outdir",
-            str(sdist_dir),
-        ],
-        cwd=built_distribution.source_copy,
-        text=True,
-        capture_output=True,
-        timeout=300,
-    )
-    assert built.returncode == 0, built.stdout + built.stderr
+    if built_distribution.sdist is None:
+        built = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-m",
+                "build",
+                "--sdist",
+                "--no-isolation",
+                "--outdir",
+                str(sdist_dir),
+            ],
+            cwd=built_distribution.source_copy,
+            text=True,
+            capture_output=True,
+            timeout=300,
+        )
+        assert built.returncode == 0, built.stdout + built.stderr
+        sdists = sorted(sdist_dir.glob("auro_runtime-*.tar.gz"))
+        assert len(sdists) == 1, sdists
+        sdist = sdists[0]
+    else:
+        sdist = built_distribution.sdist
 
-    sdists = sorted(sdist_dir.glob("auro_runtime-*.tar.gz"))
-    assert len(sdists) == 1, sdists
-    with tarfile.open(sdists[0], "r:gz") as archive:
+    with tarfile.open(sdist, "r:gz") as archive:
         members = {
             "/".join(Path(name).parts[1:])
             for name in archive.getnames()
@@ -592,7 +620,7 @@ def test_sdist_excludes_tests_and_builds_the_same_authority_set(
             "-m",
             "pip",
             "wheel",
-            str(sdists[0]),
+            str(sdist),
             "--wheel-dir",
             str(rebuilt_dir),
             "--no-build-isolation",

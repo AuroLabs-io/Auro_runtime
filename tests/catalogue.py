@@ -81,6 +81,10 @@ FILE_PURPOSE = {
         "and runs the installed package with no source checkout present. Proves the "
         "packaged authority split, the source-fallback refusal, and provenance "
         "checks hold from the artifact a user actually installs, not just from source.",
+    "test_release_evidence.py":
+        "Pins the publication gate to one explicit Git commit and tree. A dirty "
+        "checkout, a different expected commit, or ambient source content must not "
+        "produce release evidence for the reviewed tree.",
 }
 
 FILE_ORDER = list(FILE_PURPOSE)

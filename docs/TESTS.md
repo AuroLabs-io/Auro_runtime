@@ -1,6 +1,6 @@
 # Test catalogue
 
-**310 test functions** across 13 files.
+**315 test functions** across 14 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -30,7 +30,8 @@ result in this repository depends on it.
 | [`tests/test_audit_disclosure.py`](../tests/test_audit_disclosure.py) | 27 |
 | [`tests/test_archive_integrity.py`](../tests/test_archive_integrity.py) | 6 |
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 7 |
-| **Total** | **310** |
+| [`tests/test_release_evidence.py`](../tests/test_release_evidence.py) | 5 |
+| **Total** | **315** |
 
 ---
 
@@ -520,3 +521,17 @@ Builds a real wheel and sdist, installs each into an isolated environment, and r
 - **missing installed policy fails without source fallback**
 - **missing installed directive fails without source fallback**
 - **nonisolated source contamination trips provenance check** — Negative control: the same check rejects a child contaminated by PYTHONPATH.
+
+---
+
+## `tests/test_release_evidence.py`
+
+Pins the publication gate to one explicit Git commit and tree. A dirty checkout, a different expected commit, or ambient source content must not produce release evidence for the reviewed tree.
+
+5 tests.
+
+- **release identity binds head index and commit tree**
+- **release identity refuses a different expected commit**
+- **release identity refuses untracked or modified source**
+- **commit export excludes ambient working tree content**
+- **distribution evidence requires a nonzero passed count**

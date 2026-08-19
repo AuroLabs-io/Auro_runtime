@@ -47,15 +47,14 @@ jobs:
           cache: pip
       - name: Install release dependencies
         run: python -m pip install --upgrade pip ".[dev]" build twine
-      - name: Run mandatory isolated-wheel matrix
-        env:
-          AURO_RUN_DISTRIBUTION_TESTS: "1"
+      - name: Build and verify the commit-bound publication candidate
         run: >-
-          python -B -m pytest
-          tests/test_distribution_install.py
-          -m distribution
-          -p no:cacheprovider
-      - name: Build wheel and source distribution
-        run: python -B -m build
-      - name: Validate distribution metadata
-        run: python -B -m twine check dist/*
+          python -B release_evidence.py
+          --expected-commit "${{ github.sha }}"
+          --output-dir dist
+      - name: Retain the verified candidate and its evidence record
+        uses: actions/upload-artifact@v4
+        with:
+          name: publication-candidate-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error

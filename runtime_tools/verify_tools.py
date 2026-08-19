@@ -99,7 +99,8 @@ class _Sandbox:
         # Root files that make the sandbox a faithful snapshot of the project,
         # not just enough to import it — tests may legitimately assert on them.
         for config_file in ["pyproject.toml", "setup.py", "setup.cfg",
-                            "LICENSE", ".gitignore", "README.md"]:
+                            "LICENSE", ".gitignore", "README.md",
+                            "release_evidence.py"]:
             src = _root() / config_file
             if src.exists():
                 shutil.copy2(src, sandbox / config_file)
@@ -191,6 +192,7 @@ def _iter_scannable_files():
         "README.md",
         "MANIFEST.in",
         ".gitignore",
+        "release_evidence.py",
     ):
         p = root / name
         if p.is_file():
