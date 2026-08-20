@@ -279,11 +279,21 @@ class TestFilesystemAliasesAreResolvedBeforeClassification:
         "{base}/x/../.ssh/config",   # up and back
     ])
     def test_equivalent_spellings_all_resolve_to_the_same_subject(self, tmp_path, form):
-        """Spellings the filesystem treats as one path must classify as one path."""
+        """Spellings the filesystem treats as one path must classify as one path.
+
+        The `x/..` case needs `x` to be a real directory. POSIX resolves `..`
+        against the actual directory it is in, so traversing through a
+        non-existent component is ENOENT; Windows normalises the same string
+        lexically and opens the file regardless. Without creating it, this
+        passed on Windows and failed on every Linux runner -- caught by CI on
+        2026-08-19, which is the difference between measuring one platform and
+        measuring the supported ones.
+        """
         base = tmp_path.resolve()
         ssh = base / ".ssh"
         ssh.mkdir()
         (ssh / "config").write_text("Host probe\n", encoding="utf-8")
+        (base / "x").mkdir()
 
         candidate = Path(form.format(base=str(base).replace("\\", "/")))
 
