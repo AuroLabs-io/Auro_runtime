@@ -273,6 +273,52 @@ class TestFilesystemAliasesAreResolvedBeforeClassification:
         assert "error" in result, f"the stream form was read: {result!r}"
         assert "AURO_TEST_PROBE_VALUE" not in str(result)
 
+    @pytest.mark.parametrize("form", [
+        "{base}/./.ssh/config",      # dot segment
+        "{base}//.ssh/config",       # doubled separator
+        "{base}/x/../.ssh/config",   # up and back
+    ])
+    def test_equivalent_spellings_all_resolve_to_the_same_subject(self, tmp_path, form):
+        """Spellings the filesystem treats as one path must classify as one path."""
+        base = tmp_path.resolve()
+        ssh = base / ".ssh"
+        ssh.mkdir()
+        (ssh / "config").write_text("Host probe\n", encoding="utf-8")
+
+        candidate = Path(form.format(base=str(base).replace("\\", "/")))
+
+        assert candidate.exists(), "the spelling must reach the real file to be a test"
+        assert classify_resolved(candidate, base) is not None, (
+            f"{candidate} reaches .ssh/config and was not classified"
+        )
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows extended-length prefix")
+    def test_an_extended_length_path_fails_closed(self, tmp_path):
+        r"""`\\?\C:\...` is NOT normalised by resolve(), and that is the point.
+
+        Measured 2026-08-19: resolve() returns the prefix unchanged, so
+        relative_to fails, so this classifier reports UNCONTAINED and refuses --
+        and the tools' own `_path_under_base` refuses for the same reason. The
+        form is therefore rejected rather than silently judged against a subject
+        nobody relativised.
+
+        Pinned because that outcome is currently *incidental*. If a future
+        change teaches the resolution layer to strip the prefix, this form
+        starts flowing through a path that was never designed for it, and
+        nothing else would notice.
+        """
+        base = tmp_path.resolve()
+        ssh = base / ".ssh"
+        ssh.mkdir()
+        (ssh / "config").write_text("Host probe\n", encoding="utf-8")
+
+        extended = Path("\\\\?\\" + str(ssh / "config"))
+        assert extended.exists(), "the prefix must still reach the file"
+
+        match = classify_resolved(extended, base)
+        assert match is not None, "an unrelativisable path was reported as clean"
+        assert match.category == UNCONTAINED
+
     @pytest.mark.skipif(os.name != "nt", reason="NTFS 8.3 short names")
     def test_an_83_short_name_alias_is_expanded_before_classification(
         self, tmp_path
