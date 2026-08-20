@@ -37,6 +37,7 @@ from auro_runtime.sensitive_paths import (
 )
 from runtime_tools import file_tools
 from runtime_tools.file_tools import delete_file, read_file, restore_file, write_file
+from runtime_tools.validate_directive_tools import validate_directive
 
 
 @pytest.fixture
@@ -418,6 +419,38 @@ class TestEveryMutatingToolClassifiesItsResolvedTarget:
         assert (file_tools._get_base_dir() / rel).exists(), (
             "the delete was refused but the file is gone"
         )
+
+
+class TestValidateDirectiveClassifiesToo:
+    """The fifth reader, and the one nothing else covers.
+
+    The close condition says *every* filesystem tool submits its resolved target,
+    and validate_directive reads a file. It is also the only one where the tool
+    layer stands alone: the shipped `sensitive_paths` rule scopes to the five
+    file tools and does not name it, so no policy guard runs for it at all.
+    """
+
+    def test_a_sensitive_md_file_is_refused(self, workspace_probe):
+        """`.env.md` satisfies the .md requirement and is classified sensitive."""
+        rel = workspace_probe("output/.env.md", "---\nid: x\n---\nbody\n")
+
+        result = validate_directive(path=rel)
+
+        assert result.get("valid") is False, result
+        assert any("blocked" in e for e in result.get("errors", [])), result
+
+    def test_an_ordinary_directive_still_validates(self, workspace_probe):
+        """Positive control: the refusal must not swallow the tool's real job."""
+        rel = workspace_probe(
+            "output/probe_directive.md",
+            "---\nid: probe_directive\ndescription: probe\ntools: [echo]\n---\n"
+            "## Purpose\np\n## Steps\ns\n",
+        )
+
+        result = validate_directive(path=rel)
+
+        assert "errors" in result
+        assert not any("blocked" in e for e in result.get("errors", [])), result
 
 
 class TestTheAuditDistinguishesApprovedFromNeverRan:

@@ -7,6 +7,12 @@ from pathlib import Path
 from auro_runtime.directive import load_directive, DIRECTIVE_ID_RE
 from auro_runtime.executor import register, get_registry
 from auro_runtime.paths import get_project_root
+from auro_runtime.resource_plan import (
+    SOURCE,
+    ResourcePlan,
+    ResourceSubject,
+    check_resource_plan,
+)
 from auro_runtime.tool_schemas import ValidateDirectiveArgs
 
 _REQUIRED_SECTIONS = ["Purpose", "Steps"]
@@ -27,6 +33,24 @@ def validate_directive(path: str) -> dict:
         p.resolve().relative_to(base)
     except ValueError:
         return {"valid": False, "errors": ["Path is outside the allowed project directory."]}
+
+    # This tool reads a file, so it classifies its resolved target like every
+    # other tool that does. It is the only protection here rather than a second
+    # one: the shipped `sensitive_paths` rule scopes to the five file tools and
+    # does not name validate_directive, so the policy guard never runs for it.
+    #
+    # The `.md` requirement below filters most of the surface, but not all of
+    # it -- `.env.md` satisfies it and is classified sensitive. Content does not
+    # currently escape (malformed front matter is swallowed rather than quoted
+    # back), so this closes a filename and existence oracle rather than a
+    # disclosure, and it stops the class from reopening if that parser ever
+    # starts reporting what it choked on.
+    plan_err = check_resource_plan(ResourcePlan(
+        tool="validate_directive",
+        subjects=(ResourceSubject(resolved=p, base=base, role=SOURCE),),
+    ))
+    if plan_err:
+        return {"valid": False, "errors": [plan_err]}
 
     if not p.exists():
         return {"valid": False, "errors": [f"File not found: {path}"]}
