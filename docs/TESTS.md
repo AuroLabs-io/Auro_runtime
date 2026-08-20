@@ -1,6 +1,6 @@
 # Test catalogue
 
-**324 test functions** across 14 files.
+**331 test functions** across 14 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -21,7 +21,7 @@ result in this repository depends on it.
 | [`tests/test_guard_bindings.py`](../tests/test_guard_bindings.py) | 15 |
 | [`tests/test_classifier_pins.py`](../tests/test_classifier_pins.py) | 11 |
 | [`tests/test_enforcement.py`](../tests/test_enforcement.py) | 43 |
-| [`tests/test_sensitive_resource_classification.py`](../tests/test_sensitive_resource_classification.py) | 23 |
+| [`tests/test_sensitive_resource_classification.py`](../tests/test_sensitive_resource_classification.py) | 30 |
 | [`tests/test_credentials.py`](../tests/test_credentials.py) | 38 |
 | [`tests/test_registry.py`](../tests/test_registry.py) | 35 |
 | [`tests/test_directives.py`](../tests/test_directives.py) | 23 |
@@ -31,7 +31,7 @@ result in this repository depends on it.
 | [`tests/test_archive_integrity.py`](../tests/test_archive_integrity.py) | 6 |
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 7 |
 | [`tests/test_release_evidence.py`](../tests/test_release_evidence.py) | 5 |
-| **Total** | **324** |
+| **Total** | **331** |
 
 ---
 
@@ -196,7 +196,7 @@ The executor's refusal pipeline: registry check, directive scope, argument schem
 
 The single sensitive-resource inventory and both layers that consume it. Covers that the policy guard and the file tool agree on every family and category, that the tool classifies the resolved path rather than the basename, and that normalisation is host-independent. Facts about this repository's own inventory; the traversal and evasion corpora stay restricted.
 
-23 tests.
+30 tests.
 
 ### TestTheInventoryIsSharedNotCopied
 
@@ -225,6 +225,21 @@ The single sensitive-resource inventory and both layers that consume it. Covers 
 - **an approval is recorded**
 - **a refusal is recorded with its category and origin**
 - **the recorded subject is workspace relative** — An absolute path carries the operator's directory layout off the box.
+### TestTheEnvSampleFamilyIsNoLongerRefused
+
+- **the sample family is permitted**
+- **the real env family is still refused** — Control. Widening the exclusion until nothing matches would pass above.
+- **read file returns an env example** — End to end, because the refusal that mattered was at the tool.
+- **direnv is refused** — .envrc was matched by nothing: the old pattern needed a literal dot.
+### TestTheAddedCredentialFamilies
+
+- **each added family is refused under its category**
+### TestTheRejectedCandidatesStayRejected
+
+- **the rejected pattern would have caused this false positive**
+### TestTheTrackedTreeIsNotRefusedByItsOwnGuard
+
+- **no tracked file is classified sensitive** — The population that actually matters, checked against the real tree.
 ### TestNormalisationIsSharedAndHostIndependent
 
 - **case is folded on every platform** — Lowercasing used to happen only under `os.name == "nt"`, while the copy

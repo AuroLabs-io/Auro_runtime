@@ -62,6 +62,15 @@ GPG_KEYRING = "gpg_keyring"
 AURO_SECRET = "auro_secret"
 WEB_AUTH = "web_auth"
 GENERIC_CREDENTIAL = "generic_credential"
+NET_CREDENTIAL = "net_credential"
+VCS_CREDENTIAL = "vcs_credential"
+ORCHESTRATOR_CREDENTIAL = "orchestrator_credential"
+SECRET_STORE = "secret_store"
+DB_CREDENTIAL = "db_credential"
+REGISTRY_CREDENTIAL = "registry_credential"
+PACKAGE_INDEX_TOKEN = "package_index_token"
+TLS_PRIVATE_KEY = "tls_private_key"
+PROCESS_ENVIRONMENT = "process_environment"
 
 # Assigned when a caller hands this module a path that is not under the base it
 # claimed. Not a secret category -- a caller-contract violation. See
@@ -92,19 +101,93 @@ class SensitiveMatch:
 # two mechanisms are independent on purpose: a caller reaching for a pattern
 # without going through the canonicaliser still gets case-insensitive matching
 # rather than a silent miss.
+# The .env negative lookahead is a fix, not a nicety. `\.env(\..*)?$` refused
+# `.env.example`, `.env.sample`, `.env.template` and `.env.dist` -- the four
+# canonical NON-secret files, whose entire purpose is to be read so a developer
+# can discover which variables are required. At enforcement: block that refused
+# a legitimate and common action, and a guard that cries wolf on the file people
+# actually need teaches them to route around the guard.
+#
+# `.env.example.bak` still matches, because the exclusion requires the suffix to
+# end the string. A file named to look like the sample but carrying something
+# else is the case worth keeping.
 _SENSITIVE_RESOURCES: tuple[tuple[str, re.Pattern], ...] = (
-    (ENV_FILE, re.compile(r"(^|[\\/])\.env(\..*)?$", re.IGNORECASE)),
+    (ENV_FILE, re.compile(
+        r"(^|[\\/])\.env(\.(?!(example|sample|template|dist)$).*)?$", re.IGNORECASE)),
+    # direnv. Not matched by the pattern above, which requires a literal dot
+    # after `.env`, so it was invisible to the guard entirely.
+    (ENV_FILE, re.compile(r"(^|[\\/])\.envrc$", re.IGNORECASE)),
+
     (SSH_KEY, re.compile(r"(^|[\\/])\.ssh([\\/]|$)", re.IGNORECASE)),
     (SSH_KEY, re.compile(r"(^|[\\/])id_rsa", re.IGNORECASE)),
     (SSH_KEY, re.compile(r"(^|[\\/])id_ed25519", re.IGNORECASE)),
+    # Deliberately the same unanchored shape as id_rsa above, which also matches
+    # id_rsa.pub. Consistency beats precision here: an inventory whose members
+    # follow different rules for no stated reason is the thing that drifts.
+    (SSH_KEY, re.compile(r"(^|[\\/])id_ecdsa", re.IGNORECASE)),
+    (SSH_KEY, re.compile(r"(^|[\\/])id_dsa", re.IGNORECASE)),
+    (SSH_KEY, re.compile(r"(^|[\\/])id_xmss", re.IGNORECASE)),
+    (SSH_KEY, re.compile(r"(^|[\\/])ssh_host_[a-z0-9]+_key", re.IGNORECASE)),
+
     (GENERIC_CREDENTIAL, re.compile(r"(^|[\\/])\.credentials", re.IGNORECASE)),
+    (GENERIC_CREDENTIAL, re.compile(r"(^|[\\/])credentials\.json$", re.IGNORECASE)),
     (AURO_SECRET, re.compile(r"(^|[\\/])auro_secrets\.yaml$", re.IGNORECASE)),
     (AURO_SECRET, re.compile(r"(^|[\\/])\.auro_secrets\.yaml$", re.IGNORECASE)),
     (GPG_KEYRING, re.compile(r"(^|[\\/])\.gnupg([\\/]|$)", re.IGNORECASE)),
     (CLOUD_CREDENTIAL, re.compile(r"(^|[\\/])\.aws([\\/]|$)", re.IGNORECASE)),
-    (GENERIC_CREDENTIAL, re.compile(r"(^|[\\/])credentials\.json$", re.IGNORECASE)),
     (WEB_AUTH, re.compile(r"(^|[\\/])\.htpasswd$", re.IGNORECASE)),
+
+    (NET_CREDENTIAL, re.compile(r"(^|[\\/])\.netrc$", re.IGNORECASE)),
+    (NET_CREDENTIAL, re.compile(r"(^|[\\/])_netrc$", re.IGNORECASE)),
+    (VCS_CREDENTIAL, re.compile(r"(^|[\\/])\.git-credentials$", re.IGNORECASE)),
+
+    # Whole directory, like .ssh and .aws: everything under a kube config dir is
+    # cluster credential material, not just the file named `config`.
+    (ORCHESTRATOR_CREDENTIAL, re.compile(r"(^|[\\/])\.kube([\\/]|$)", re.IGNORECASE)),
+    (ORCHESTRATOR_CREDENTIAL, re.compile(r"(^|[\\/])etc/kubernetes([\\/]|$)", re.IGNORECASE)),
+
+    (SECRET_STORE, re.compile(r"(^|[\\/])\.vault-token$", re.IGNORECASE)),
+    (SECRET_STORE, re.compile(r"(^|[\\/])run/secrets([\\/]|$)", re.IGNORECASE)),
+    (SECRET_STORE, re.compile(r"(^|[\\/])var/run/secrets([\\/]|$)", re.IGNORECASE)),
+
+    (DB_CREDENTIAL, re.compile(r"(^|[\\/])\.pgpass$", re.IGNORECASE)),
+    (DB_CREDENTIAL, re.compile(r"(^|[\\/])\.my\.cnf$", re.IGNORECASE)),
+
+    (REGISTRY_CREDENTIAL, re.compile(r"(^|[\\/])\.docker[\\/]config\.json$", re.IGNORECASE)),
+    (PACKAGE_INDEX_TOKEN, re.compile(r"(^|[\\/])\.pypirc$", re.IGNORECASE)),
+
+    # The structural answer for private keys: block the reserved directories
+    # rather than the extension. See the rejected candidates below for why
+    # `\.pem$` and `\.key$` are not here.
+    (TLS_PRIVATE_KEY, re.compile(r"(^|[\\/])etc/ssl/private([\\/]|$)", re.IGNORECASE)),
+    (TLS_PRIVATE_KEY, re.compile(r"(^|[\\/])etc/pki/tls/private([\\/]|$)", re.IGNORECASE)),
+    (TLS_PRIVATE_KEY, re.compile(r"(^|[\\/])etc/letsencrypt([\\/]|$)", re.IGNORECASE)),
+
+    (PROCESS_ENVIRONMENT, re.compile(r"(^|[\\/])proc/[^\\/]+/environ$", re.IGNORECASE)),
 )
+
+# Candidates considered and REJECTED, with the evidence, so they are not
+# proposed again. Each was tested against this repository's tracked files and a
+# corpus of realistic paths from other ecosystems before being turned down.
+#
+#   \.pem$              PEM is a container format, not a secret class. It holds
+#                       certificates and public keys as often as private ones,
+#                       and it hits this repository's own tests/fixtures/ca.pem.
+#   \.key$              Also the Keynote extension and a common i18n/locale
+#                       extension. Blocks far more than it protects.
+#   \.(crt|cer)$        Certificates are public by construction. Refusing them
+#                       protects nothing and breaks ordinary TLS debugging.
+#   credentials         Unanchored, it hits this repository's own
+#                       docs/CREDENTIALS.md. The anchored file forms that are
+#                       genuinely credentials are in the inventory above.
+#   passwd$             World-readable by design; the secret moved to `shadow`
+#                       decades ago. Blocking it signals protection without any.
+#   secrets?            Decisively rejected: it blocks the runtime's OWN source,
+#                       auro_runtime/secrets.py and all of
+#                       auro_runtime/secrets_backends/. A pattern that refuses
+#                       the code implementing secret handling is the clearest
+#                       possible demonstration that name-shaped matching is not
+#                       classification.
 
 
 def canonicalize_path(p: str) -> str:

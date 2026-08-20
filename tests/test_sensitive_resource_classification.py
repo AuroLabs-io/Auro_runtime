@@ -477,6 +477,139 @@ class TestTheAuditDistinguishesApprovedFromNeverRan:
         assert ":" not in recorded and not recorded.startswith("/")
 
 
+class TestTheEnvSampleFamilyIsNoLongerRefused:
+    """The false positive the inventory carried while it was three lists.
+
+    `\\.env(\\..*)?$` refused the four canonical NON-secret files, whose whole
+    purpose is to be read so a developer can discover which variables are
+    required. At `enforcement: block` that refused a legitimate and common
+    action, and a guard that cries wolf on the file people actually need teaches
+    them to route around the guard.
+    """
+
+    @pytest.mark.parametrize("name", [
+        ".env.example",
+        ".env.sample",
+        ".env.template",
+        ".env.dist",
+        "config/.env.example",
+        "output/.env.sample",
+    ])
+    def test_the_sample_family_is_permitted(self, name):
+        assert classify_text(name) is None, f"{name!r} is a non-secret and was refused"
+
+    @pytest.mark.parametrize("name", [
+        ".env",
+        ".env.production",
+        ".env.local",
+        "output/.env",
+        # Named to look like the sample but carrying something else. The
+        # exclusion requires the suffix to END the string, so this still fails.
+        ".env.example.bak",
+    ])
+    def test_the_real_env_family_is_still_refused(self, name):
+        """Control. Widening the exclusion until nothing matches would pass above."""
+        assert classify_text(name) is not None, f"{name!r} is a secret and was allowed"
+
+    def test_read_file_returns_an_env_example(self, workspace_probe):
+        """End to end, because the refusal that mattered was at the tool."""
+        rel = workspace_probe("output/.env.example", "API_KEY=\nDB_URL=\n")
+
+        result = read_file(path=rel)
+
+        assert "error" not in result, result
+        assert "API_KEY=" in result["content"]
+
+    def test_direnv_is_refused(self):
+        """.envrc was matched by nothing: the old pattern needed a literal dot."""
+        assert classify_text(".envrc") is not None
+
+
+class TestTheAddedCredentialFamilies:
+
+    @pytest.mark.parametrize("name,category", [
+        (".netrc", "net_credential"),
+        ("_netrc", "net_credential"),
+        (".git-credentials", "vcs_credential"),
+        (".kube/config", "orchestrator_credential"),
+        ("etc/kubernetes/admin.conf", "orchestrator_credential"),
+        (".vault-token", "secret_store"),
+        ("run/secrets/db_password", "secret_store"),
+        ("var/run/secrets/token", "secret_store"),
+        (".pgpass", "db_credential"),
+        (".my.cnf", "db_credential"),
+        (".docker/config.json", "registry_credential"),
+        (".pypirc", "package_index_token"),
+        ("etc/ssl/private/server.key", "tls_private_key"),
+        ("etc/pki/tls/private/x.key", "tls_private_key"),
+        ("etc/letsencrypt/live/example.com/privkey.pem", "tls_private_key"),
+        ("proc/self/environ", "process_environment"),
+        ("id_ecdsa", "ssh_key"),
+        ("id_dsa", "ssh_key"),
+        ("id_xmss", "ssh_key"),
+        ("etc/ssh/ssh_host_rsa_key", "ssh_key"),
+    ])
+    def test_each_added_family_is_refused_under_its_category(self, name, category):
+        match = classify_text(name)
+        assert match is not None, f"{name!r} was not classified"
+        assert match.category == category
+
+
+class TestTheRejectedCandidatesStayRejected:
+    """Each of these was proposed, tested, and turned down with evidence.
+
+    They are tested rather than only commented because a future author reaching
+    for "block anything named like a secret" will reach for exactly these, and a
+    comment does not fail the build. The most important row is the last: a
+    `secrets?` pattern blocks the runtime's own source, which is the clearest
+    demonstration available that name-shaped matching is not classification.
+    """
+
+    @pytest.mark.parametrize("name,why", [
+        ("tests/fixtures/ca.pem", "PEM is a container format, not a secret class"),
+        ("keys/public.pem", "PEM holds public material as often as private"),
+        ("certs/server.crt", "certificates are public by construction"),
+        ("certs/server.cer", "certificates are public by construction"),
+        ("assets/deck.key", ".key is also the Keynote extension"),
+        ("locales/en.key", ".key is also an i18n extension"),
+        ("docs/CREDENTIALS.md", "unanchored `credentials` hits our own docs"),
+        ("etc/passwd", "world-readable by design; the secret moved to shadow"),
+        ("auro_runtime/secrets.py", "a `secrets?` pattern blocks our own source"),
+        ("auro_runtime/secrets_backends/__init__.py",
+         "a `secrets?` pattern blocks our own source"),
+    ])
+    def test_the_rejected_pattern_would_have_caused_this_false_positive(self, name, why):
+        assert classify_text(name) is None, f"{name!r} refused, but: {why}"
+
+
+class TestTheTrackedTreeIsNotRefusedByItsOwnGuard:
+
+    def test_no_tracked_file_is_classified_sensitive(self, repo_root):
+        """The population that actually matters, checked against the real tree.
+
+        A credential family added on paper can be validated against imagined
+        paths indefinitely. The repository's own tracked files are the one
+        corpus that is certainly real, and refusing any of them is a defect the
+        moment it lands rather than a hypothetical.
+        """
+        import subprocess
+
+        listed = subprocess.run(
+            ["git", "ls-files"],
+            cwd=repo_root, capture_output=True, text=True, timeout=60,
+        )
+        if listed.returncode != 0:
+            pytest.skip("not a git checkout")
+        tracked = [line for line in listed.stdout.splitlines() if line.strip()]
+        assert tracked, "git ls-files returned nothing; the check would be vacuous"
+
+        refused = {f: classify_text(f) for f in tracked if classify_text(f)}
+        assert refused == {}, (
+            f"the guard refuses this repository's own tracked files: "
+            f"{ {k: v.category for k, v in refused.items()} }"
+        )
+
+
 class TestNormalisationIsSharedAndHostIndependent:
 
     @pytest.mark.parametrize("raw,expected", [
