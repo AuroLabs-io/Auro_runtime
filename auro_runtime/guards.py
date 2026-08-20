@@ -66,21 +66,88 @@ def get_guard_registry() -> dict[str, GuardFn]:
 _REDACT_KEYS = SENSITIVE_KEYS
 
 
-def redact_for_audit(args: dict, matched_fields: list[str] | None = None) -> dict:
-    """Return a copy of args with sensitive values replaced by '[REDACTED]'."""
+def format_field_path(segments) -> str:
+    """Render a segment path for humans. Display only -- never re-parsed.
+
+    The single place a path becomes a string, so the four producers cannot drift
+    into four spellings. Deliberately not injective and that is fine: `{"a":
+    {"b": ...}}` and `{"a.b": ...}` both render `a.b`, which is readable and
+    unambiguous *for a reader who also has the record*. Nothing reconstructs
+    structure from this, which is the property that matters.
+    """
+    out = ""
+    for seg in segments:
+        if isinstance(seg, int):
+            out += f"[{seg}]"
+        else:
+            out = f"{out}.{seg}" if out else str(seg)
+    return out or "<root>"
+
+
+def _redact_everything(node):
+    """Replace every string leaf with the marker. The fail-closed fallback."""
+    if isinstance(node, dict):
+        return {k: _redact_everything(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_redact_everything(v) for v in node]
+    if isinstance(node, str):
+        return "[REDACTED]"
+    return node
+
+
+def redact_for_audit(args: dict, matched_fields=None) -> dict:
+    """Return a copy of args with sensitive values replaced by '[REDACTED]'.
+
+    `matched_fields` is a list of **structured segment paths** -- `[["items", 0,
+    "api_key"]]` -- not flattened strings. That is the fix for a whole class of
+    defect rather than one instance of it.
+
+    The old format flattened structure into a dotted string that this function
+    then re-parsed, and the round trip was lossy in two separate ways. It split
+    on `.` alone, so an index segment never resolved and any credential inside a
+    list was silently left in the clear. And the flattening was **not
+    injective**: `{"a": {"b": {...}}}` and `{"a.b": {...}}` produce the identical
+    string, so no parser however careful could tell them apart. Fixing the
+    parser would have closed the first and left the second permanently open.
+    Carrying the structure instead means there is no grammar for a producer and
+    a consumer to disagree about.
+
+    An unresolvable path redacts EVERYTHING rather than skipping quietly. A
+    targeted pass that cannot find its target has not decided the value is safe;
+    it has failed to look, and those two outcomes were previously indistinguishable
+    in the output. Over-redacting costs an operator some audit detail in a case
+    that should never occur, and the alternative cost is a credential in the log.
+    Fail closed (D-038), and visibly: an all-redacted record is itself the signal
+    that something is wrong with the guard that produced the path.
+    """
     out = sanitize_value(args)
-    if matched_fields:
-        for field_path in matched_fields:
-            parts = field_path.split(".")
-            obj = out
-            for part in parts[:-1]:
-                if isinstance(obj, dict) and part in obj:
-                    obj = obj[part]
-                else:
-                    break
+    if not matched_fields:
+        return out
+
+    for segments in matched_fields:
+        # A bare string is a single key, not a path to be split. Accepting it
+        # keeps a caller that passes one field name working, without
+        # reintroducing a grammar.
+        if isinstance(segments, str):
+            segments = [segments]
+        if not segments:
+            return _redact_everything(out)
+
+        obj = out
+        for seg in segments[:-1]:
+            if isinstance(obj, dict) and not isinstance(seg, int) and seg in obj:
+                obj = obj[seg]
+            elif isinstance(obj, list) and isinstance(seg, int) and -len(obj) <= seg < len(obj):
+                obj = obj[seg]
             else:
-                if isinstance(obj, dict) and parts[-1] in obj:
-                    obj[parts[-1]] = "[REDACTED]"
+                return _redact_everything(out)
+        last = segments[-1]
+        if isinstance(obj, dict) and not isinstance(last, int) and last in obj:
+            obj[last] = "[REDACTED]"
+        elif isinstance(obj, list) and isinstance(last, int) and -len(obj) <= last < len(obj):
+            obj[last] = "[REDACTED]"
+        else:
+            return _redact_everything(out)
 
     return out
 
@@ -143,7 +210,7 @@ def _scan_for_secrets(text: str) -> list[dict]:
     return hits
 
 
-def _scan_dict_for_secrets(d: dict, prefix: str = "") -> list[dict]:
+def _scan_dict_for_secrets(d: dict, prefix: tuple = ()) -> list[dict]:
     """Recursively scan dict keys and values for secrets, returning field paths.
 
     Keys are scanned as well as values because this runs against `raw_args`,
@@ -153,15 +220,25 @@ def _scan_dict_for_secrets(d: dict, prefix: str = "") -> list[dict]:
     """
     hits = []
     for k, v in d.items():
-        field_path = f"{prefix}.{k}" if prefix else k
+        field_path = (*prefix, k)
         if isinstance(k, str):
             kind = _secret_kind(k)
             if kind:
-                hits.append({"kind": kind, "field": f"{prefix}<key>" if prefix else "<key>"})
+                # The secret IS the key name. There is no value to address, so
+                # this carries no path: redacting it means rewriting the key,
+                # which sanitize_value already does ([REDACTED_KEY]). Handing an
+                # unaddressable pseudo-path to the targeted pass is what the old
+                # `<key>` marker did, and it could only ever silently no-op.
+                hits.append({
+                    "kind": kind,
+                    "path": None,
+                    "field": f"{format_field_path(prefix)}.<key>" if prefix else "<key>",
+                })
         if isinstance(v, str):
             for kind, pattern in _SECRET_PATTERNS:
                 if pattern.search(v):
-                    hits.append({"kind": kind, "field": field_path})
+                    hits.append({"kind": kind, "path": field_path,
+                                 "field": format_field_path(field_path)})
         elif isinstance(v, dict):
             hits.extend(_scan_dict_for_secrets(v, field_path))
         elif isinstance(v, list):
@@ -169,7 +246,7 @@ def _scan_dict_for_secrets(d: dict, prefix: str = "") -> list[dict]:
     return hits
 
 
-def _scan_list_for_secrets(items: list, prefix: str) -> list[dict]:
+def _scan_list_for_secrets(items: list, prefix: tuple) -> list[dict]:
     """Scan list items, recursing into nested dicts and lists.
 
     Without the recursion a secret one level inside a list of dicts — e.g.
@@ -177,11 +254,12 @@ def _scan_list_for_secrets(items: list, prefix: str) -> list[dict]:
     """
     hits = []
     for i, item in enumerate(items):
-        field_path = f"{prefix}[{i}]"
+        field_path = (*prefix, i)
         if isinstance(item, str):
             for kind, pattern in _SECRET_PATTERNS:
                 if pattern.search(item):
-                    hits.append({"kind": kind, "field": field_path})
+                    hits.append({"kind": kind, "path": field_path,
+                                 "field": format_field_path(field_path)})
         elif isinstance(item, dict):
             hits.extend(_scan_dict_for_secrets(item, field_path))
         elif isinstance(item, list):
@@ -198,12 +276,23 @@ def check_no_secrets_in_args(ctx: GuardContext) -> GuardVerdict | None:
     all_hits = hits + reason_hits
     if all_hits:
         kinds = sorted(set(h["kind"] for h in all_hits))
-        fields = sorted(set(h.get("field", "") for h in all_hits))
+        # Two fields, two jobs, no re-parsing between them. `matched_fields`
+        # carries structured paths the executor walks; `matched_field_labels`
+        # carries the rendering an operator reads. Hits with no addressable
+        # path -- a secret used as a key name, or one in `reason`, which is not
+        # part of args at all -- are labelled but never handed to the targeted
+        # pass, because an unresolvable path now forces a full redaction.
+        paths = [list(h["path"]) for h in all_hits if h.get("path")]
+        labels = sorted(set(h.get("field", "") for h in all_hits))
         return GuardVerdict(
             allowed=False,
             message=f"Tool call args or reason appears to contain secrets ({', '.join(kinds)}).",
             code="secret_detected",
-            metadata={"matched_kinds": kinds, "matched_fields": fields},
+            metadata={
+                "matched_kinds": kinds,
+                "matched_fields": paths,
+                "matched_field_labels": labels,
+            },
         )
     return None
 
@@ -261,17 +350,18 @@ _RAW_CREDENTIAL_KEYS = frozenset({
 })
 
 
-def _find_raw_credential(node, prefix: str = "") -> tuple[str, str] | None:
+def _find_raw_credential(node, prefix: tuple = ()) -> tuple[tuple, str] | None:
     """
     Find the first credential-shaped key holding a non-empty string value.
 
     Recurses, because the common case is nested — headers={"Authorization": "..."}
-    rather than a top-level token argument. Returns (field_path, key) or None.
+    rather than a top-level token argument. Returns (segments, key) or None,
+    where segments is a structured path such as ("headers", "Authorization").
     """
     if isinstance(node, dict):
         for key, val in node.items():
             key_lower = str(key).lower()
-            field_path = f"{prefix}.{key}" if prefix else str(key)
+            field_path = (*prefix, key)
             if key_lower.endswith("_alias"):
                 continue  # naming an alias is exactly what we want
             if key_lower in _RAW_CREDENTIAL_KEYS and isinstance(val, str) and val.strip():
@@ -281,7 +371,7 @@ def _find_raw_credential(node, prefix: str = "") -> tuple[str, str] | None:
                 return found
     elif isinstance(node, list):
         for i, item in enumerate(node):
-            found = _find_raw_credential(item, f"{prefix}[{i}]")
+            found = _find_raw_credential(item, (*prefix, i))
             if found:
                 return found
     return None
@@ -291,21 +381,23 @@ def _find_raw_credential(node, prefix: str = "") -> tuple[str, str] | None:
 def check_no_raw_credentials(ctx: GuardContext) -> GuardVerdict | None:
     found = _find_raw_credential(ctx.raw_args)
     if found:
-        field_path, key = found
+        segments, key = found
+        label = format_field_path(segments)
         return GuardVerdict(
             allowed=False,
             message=(
-                f"Credential-like argument '{field_path}' must use an alias, not a raw value. "
+                f"Credential-like argument '{label}' must use an alias, not a raw value. "
                 f"Use the tool's *_alias parameter (e.g. auth_alias) so the secret is resolved "
                 f"at call time and never enters the transcript."
             ),
             code="raw_credential",
             # `matched_fields` is the contract the executor reads before writing
-            # the audit record (see REDACTING_VERDICT_CODES). `field` is kept as
-            # the human-readable single path; without `matched_fields` the
-            # targeted redaction is skipped and this guard's own finding lands
-            # in the log in the clear.
-            metadata={"key": key, "field": field_path, "matched_fields": [field_path]},
+            # the audit record (see REDACTING_VERDICT_CODES): structured segment
+            # paths, walked directly rather than parsed. `field` remains the
+            # human-readable rendering. Without `matched_fields` the targeted
+            # redaction is skipped and this guard's own finding lands in the log
+            # in the clear.
+            metadata={"key": key, "field": label, "matched_fields": [list(segments)]},
         )
     return None
 

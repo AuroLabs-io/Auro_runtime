@@ -430,7 +430,54 @@ def test_secret_in_reason_is_detected(make_guard_context):
     ctx = make_guard_context("echo", {"message": "hi"}, reason="use sk-ant-" + "d" * 24)
     verdict = guard(ctx)
     assert verdict is not None
-    assert "reason" in verdict.metadata.get("matched_fields", [])
+    assert "reason" in verdict.metadata.get("matched_field_labels", [])
+
+
+def test_a_secret_in_reason_is_labelled_but_not_given_to_the_targeted_pass(
+    make_guard_context,
+):
+    """`reason` is not part of args, so it is not an addressable path.
+
+    It used to be listed in `matched_fields` anyway, where the targeted
+    redaction pass would look for a key called "reason" in the arguments, not
+    find one, and skip silently. Harmless there — the reason string is scrubbed
+    separately — but it is the same shape as the defect this contract change
+    closes, and an unresolvable path now forces a full redaction rather than a
+    quiet no-op. Labelling it without addressing it is the honest split.
+    """
+    ctx = make_guard_context("echo", {"message": "hi"}, reason="use sk-ant-" + "d" * 24)
+    verdict = get_guard_registry()["check_no_secrets_in_args"](ctx)
+
+    assert verdict.metadata["matched_fields"] == [], (
+        "an unaddressable hit reached the targeted pass, which would now "
+        "over-redact the whole record"
+    )
+    assert "reason" in verdict.metadata["matched_field_labels"]
+
+
+def test_the_secret_scanner_emits_a_walkable_path_for_a_nested_list(
+    make_guard_context,
+):
+    """The scanner's path must be one the redactor can actually walk.
+
+    Asserted structurally rather than end to end, because it cannot be isolated
+    end to end: the scanner and the name-and-pattern pass share
+    `_SECRET_PATTERNS`, so anything the scanner detects the baseline pass would
+    redact anyway, and a broken path would still produce a clean-looking record.
+    The path itself is the only observable that distinguishes them.
+    """
+    secret = "sk-ant-" + "f" * 24
+    ctx = make_guard_context("http_request", {"items": [{"note": secret}]})
+
+    verdict = get_guard_registry()["check_no_secrets_in_args"](ctx)
+
+    assert verdict is not None, "precondition: the scanner must fire"
+    assert verdict.metadata["matched_fields"] == [["items", 0, "note"]], (
+        f"expected structured segments, got "
+        f"{verdict.metadata['matched_fields']!r} — a list index rendered into "
+        f"the path string is exactly the shape the redactor cannot resolve"
+    )
+    assert verdict.metadata["matched_field_labels"] == ["items[0].note"]
 
 
 def test_secret_guard_audit_redacts_the_value(make_tool_call, make_rule, registry, audit_events):

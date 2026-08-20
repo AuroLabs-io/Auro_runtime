@@ -644,3 +644,172 @@ def test_redacting_verdicts_carry_the_field_the_executor_reads(
         f"{guard_name} emits '{verdict.code}', which triggers targeted redaction, "
         f"but supplies no matched_fields for it to act on"
     )
+    for segments in verdict.metadata["matched_fields"]:
+        assert isinstance(segments, list) and segments, (
+            f"{guard_name} supplied {segments!r}. matched_fields carries "
+            f"structured segment paths; a flattened string would have to be "
+            f"re-parsed, which is the ambiguity this contract removed"
+        )
+
+
+def test_the_contract_check_fails_when_a_guard_supplies_the_wrong_key():
+    """Negative control for the parametrized test above.
+
+    With every real guard compliant, that test passes whether or not its
+    assertion is capable of failing. This drives the same two conditions over a
+    verdict shaped like the original defect — the guard finding the field and
+    reporting it under a key the executor does not read — and requires them to
+    reject it.
+    """
+    from auro_runtime.executor import REDACTING_VERDICT_CODES
+    from auro_runtime.guards import GuardVerdict
+
+    defective = GuardVerdict(
+        allowed=False,
+        message="found one",
+        code="raw_credential",
+        # Exactly the 2026-08-03 defect: the path is known and handed over
+        # under a name nothing consumes.
+        metadata={"key": "client_id", "field": "items[0].client_id"},
+    )
+
+    assert defective.code in REDACTING_VERDICT_CODES
+    assert not (defective.metadata and defective.metadata.get("matched_fields")), (
+        "the contract assertion would have accepted a verdict that supplies no "
+        "matched_fields, so the parametrized test above proves nothing"
+    )
+
+    # The other half: supplying the key but in the old flattened form. Every
+    # real guard emits lists, so without this the shape assertion in the
+    # parametrized test could be weakened to a null check and nothing would
+    # notice.
+    flattened = GuardVerdict(
+        allowed=False, message="found one", code="raw_credential",
+        metadata={"matched_fields": ["items[0].client_id"]},
+    )
+    assert not all(
+        isinstance(segments, list) and segments
+        for segments in flattened.metadata["matched_fields"]
+    ), (
+        "the shape assertion would have accepted a flattened string, which is "
+        "the ambiguous format this contract replaced"
+    )
+
+
+# --- the targeted pass, across every shape a producer can emit ---------------
+
+
+@pytest.mark.parametrize("args, segments, shape", [
+    ({"project_ref": BESPOKE_CREDENTIAL},
+     [["project_ref"]], "top level"),
+    ({"outer": {"project_ref": BESPOKE_CREDENTIAL}},
+     [["outer", "project_ref"]], "plain nesting"),
+    ({"items": [{"project_ref": BESPOKE_CREDENTIAL}]},
+     [["items", 0, "project_ref"]], "inside a list"),
+    ({"items": [[{"project_ref": BESPOKE_CREDENTIAL}]]},
+     [["items", 0, 0, "project_ref"]], "list inside a list"),
+    ({"a.b": {"project_ref": BESPOKE_CREDENTIAL}},
+     [["a.b", "project_ref"]], "a key containing a dot"),
+])
+def test_the_targeted_pass_reaches_every_shape(args, segments, shape):
+    """
+    The reopen of 2026-08-05 was the `inside a list` row: paths were flattened
+    to strings and split on `.`, so an index segment never resolved and the pass
+    silently no-opped.
+
+    The `a key containing a dot` row is why fixing the parser would not have
+    been enough. `{"a": {"b": ...}}` and `{"a.b": ...}` flatten to the identical
+    string, so the format was not injective and no parser however careful could
+    tell them apart. Carrying structure removes the grammar entirely.
+
+    Every row uses a key outside SENSITIVE_KEYS, so only the targeted pass can
+    do the work — the name-based pass would otherwise rescue the assertion and
+    hide a broken pass.
+    """
+    from auro_runtime.guards import redact_for_audit
+    from auro_runtime.sanitization import SENSITIVE_KEYS
+
+    assert "project_ref" not in SENSITIVE_KEYS, "probe key must be uncovered by name"
+
+    out = redact_for_audit(args, segments)
+    assert BESPOKE_CREDENTIAL not in repr(out), f"{shape}: not redacted -> {out!r}"
+
+    kept = redact_for_audit(args, None)
+    assert BESPOKE_CREDENTIAL in repr(kept), (
+        f"{shape}: the control failed — the value is being removed by something "
+        f"other than the targeted pass, so this row proves nothing"
+    )
+
+
+@pytest.mark.parametrize("segments", [
+    [["nope", "missing"]],          # first segment absent
+    [["nope", "harmless"]],         # prefix absent, LAST segment exists at root
+    [["items", 7, "project_ref"]],  # index out of range
+    [["items", 0, "absent"]],       # every segment but the last resolves
+    [["items", "0", "project_ref"]],  # string where an index belongs
+    [[]],                            # empty path
+])
+def test_an_unresolvable_path_redacts_everything_rather_than_skipping(segments):
+    """The class closure, and the half that outlives this particular bug.
+
+    A targeted pass that cannot find its target has not decided the value is
+    safe — it has failed to look, and those two outcomes were previously
+    indistinguishable in the output. Any future producer that emits a path this
+    consumer cannot walk now over-redacts instead of leaking, so the next
+    instance of this class costs audit detail rather than a credential.
+
+    Fail-closed per D-038, and visibly: an all-redacted record is itself the
+    signal that something is wrong with the guard that produced the path.
+    """
+    from auro_runtime.guards import redact_for_audit
+
+    args = {"items": [{"project_ref": BESPOKE_CREDENTIAL}], "harmless": "keep-me"}
+    out = redact_for_audit(args, segments)
+
+    assert BESPOKE_CREDENTIAL not in repr(out)
+    assert "keep-me" not in repr(out), (
+        "the fallback redacted the named target but not the rest, so a value "
+        "under a path nobody named would still have leaked"
+    )
+
+
+def test_a_resolvable_path_does_not_trigger_the_fallback():
+    """Control: the over-redaction fires on failure only, not on every call."""
+    from auro_runtime.guards import redact_for_audit
+
+    out = redact_for_audit(
+        {"items": [{"project_ref": BESPOKE_CREDENTIAL}], "harmless": "keep-me"},
+        [["items", 0, "project_ref"]],
+    )
+
+    assert BESPOKE_CREDENTIAL not in repr(out)
+    assert "keep-me" in repr(out), (
+        "a resolvable path triggered the blanket fallback, which would destroy "
+        "audit detail on every redacting verdict"
+    )
+
+
+def test_the_guard_and_the_redactor_agree_on_a_nested_credential(make_guard_context):
+    """End to end: the path the guard emits is one the consumer can walk.
+
+    The original defect was not that either half was wrong on its own — it was
+    that the guard produced a format its own consumer could not parse. This
+    composes them rather than testing each in isolation, which is where the
+    disagreement lived.
+    """
+    from auro_runtime.guards import redact_for_audit, get_guard_registry
+
+    args = {"url": "https://x", "items": [{"client_id": BESPOKE_CREDENTIAL}],
+            "note": "ordinary detail"}
+    verdict = get_guard_registry()["check_no_raw_credentials"](
+        make_guard_context("http_request", args)
+    )
+
+    assert verdict is not None, "precondition: the guard must fire"
+    out = redact_for_audit(args, verdict.metadata["matched_fields"])
+
+    assert BESPOKE_CREDENTIAL not in repr(out)
+    assert "ordinary detail" in repr(out), (
+        "unrelated argument content did not survive redaction, so the audit "
+        "record loses the context an operator needs"
+    )

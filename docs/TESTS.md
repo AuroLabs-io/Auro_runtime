@@ -1,6 +1,6 @@
 # Test catalogue
 
-**335 test functions** across 14 files.
+**342 test functions** across 14 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -20,9 +20,9 @@ result in this repository depends on it.
 | [`tests/test_policy_validation.py`](../tests/test_policy_validation.py) | 30 |
 | [`tests/test_guard_bindings.py`](../tests/test_guard_bindings.py) | 15 |
 | [`tests/test_classifier_pins.py`](../tests/test_classifier_pins.py) | 11 |
-| [`tests/test_enforcement.py`](../tests/test_enforcement.py) | 43 |
+| [`tests/test_enforcement.py`](../tests/test_enforcement.py) | 45 |
 | [`tests/test_sensitive_resource_classification.py`](../tests/test_sensitive_resource_classification.py) | 34 |
-| [`tests/test_credentials.py`](../tests/test_credentials.py) | 38 |
+| [`tests/test_credentials.py`](../tests/test_credentials.py) | 43 |
 | [`tests/test_registry.py`](../tests/test_registry.py) | 35 |
 | [`tests/test_directives.py`](../tests/test_directives.py) | 23 |
 | [`tests/test_end_to_end.py`](../tests/test_end_to_end.py) | 17 |
@@ -31,7 +31,7 @@ result in this repository depends on it.
 | [`tests/test_archive_integrity.py`](../tests/test_archive_integrity.py) | 6 |
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 7 |
 | [`tests/test_release_evidence.py`](../tests/test_release_evidence.py) | 5 |
-| **Total** | **335** |
+| **Total** | **342** |
 
 ---
 
@@ -144,7 +144,7 @@ Law 10's enforcement: every caller-supplied locator argument is inspected or exe
 
 The executor's refusal pipeline: registry check, directive scope, argument schema, then policy guards across block/warn/advisory and fail_closed/fail_open.
 
-43 tests.
+45 tests.
 
 - **unknown tool is refused**
 - **known tool with no restrictions succeeds**
@@ -175,6 +175,8 @@ The executor's refusal pipeline: registry check, directive scope, argument schem
 - **bulk writes guard allows rewriting the same path**
 - **secret in args is detected**
 - **secret in reason is detected**
+- **a secret in reason is labelled but not given to the targeted pass** — `reason` is not part of args, so it is not an addressable path.
+- **the secret scanner emits a walkable path for a nested list** — The scanner's path must be one the redactor can actually walk.
 - **secret guard audit redacts the value** — A secret must never reach the audit log in plaintext.
 - **real policies block sensitive path reads** — End of the chain: the actual shipped rules refuse a secrets-file read.
 - **real policies allow a benign call**
@@ -263,7 +265,7 @@ The single sensitive-resource inventory and both layers that consume it. Covers 
 
 Alias resolution and delivery. The property under test throughout is that a resolved secret never appears in a tool result, an error message, or the audit trail.
 
-38 tests.
+43 tests.
 
 ### TestKeyringBackendRoundTrip
 
@@ -305,6 +307,11 @@ Alias resolution and delivery. The property under test throughout is that a reso
 - **targeted redaction reaches a key the name pass does not** — Pins the matched_fields pass on its own.
 - **credential header spellings are redacted by name** — `x-api-key` and `x-auth-token` carry credentials and match no secret
 - **redacting verdicts carry the field the executor reads** — Pins the contract behind the test above. A verdict whose code is in
+- **the contract check fails when a guard supplies the wrong key** — Negative control for the parametrized test above.
+- **the targeted pass reaches every shape** — The reopen of 2026-08-05 was the `inside a list` row: paths were flattened
+- **an unresolvable path redacts everything rather than skipping** — The class closure, and the half that outlives this particular bug.
+- **a resolvable path does not trigger the fallback** — Control: the over-redaction fires on failure only, not on every call.
+- **the guard and the redactor agree on a nested credential** — End to end: the path the guard emits is one the consumer can walk.
 
 ---
 

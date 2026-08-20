@@ -279,13 +279,16 @@ class GuardVerdict:
 
 If a verdict's `code` is in `executor.REDACTING_VERDICT_CODES` — currently `("secret_detected", "raw_credential")` — the executor copies the call's **raw** args into the audit record as `redacted_args`, passing them through `redact_for_audit(raw_args, metadata["matched_fields"])` first.
 
-**A guard emitting one of those codes must supply `metadata["matched_fields"]`**, as a list of dotted paths to the offending values. Emitting the code without the paths is worse than emitting no code at all: the code is what causes the arguments to be recorded in the first place, and without the paths only the generic name-and-pattern scrub applies.
+**A guard emitting one of those codes must supply `metadata["matched_fields"]`**, as a list of **structured segment paths** — `[["headers", "Authorization"], ["items", 0, "api_key"]]`. A string segment indexes a dict, an integer segment indexes a list. Emitting the code without the paths is worse than emitting no code at all: the code is what causes the arguments to be recorded in the first place, and without the paths only the generic name-and-pattern scrub applies.
+
+Segments rather than a dotted string, because the flattened form was ambiguous and could not be repaired. `{"a": {"b": …}}` and `{"a.b": …}` produce the identical string `a.b`, so no parser however careful could tell them apart, and a path holding a list index never resolved at all. Carrying the structure means there is no grammar for a producer and a consumer to disagree about. Use `guards.format_field_path(segments)` for anything a human reads; nothing reconstructs structure from that rendering.
 
 **Caveats**
 
 - The name-and-pattern pass (`sanitize_value`) always runs on the copied args. `matched_fields` adds a targeted pass on top of it; it does not replace it.
-- The targeted pass walks dict keys only. A path holding a list index — `headers[0].Authorization` — does not resolve, so that value gets the generic pass alone. `check_no_secrets_in_args` can produce such paths from nested lists.
-- Paths that are not argument paths, such as the `reason` and `<key>` markers `check_no_secrets_in_args` emits, are ignored by the walk.
+- **An unresolvable path redacts every string in the record**, rather than being skipped. A targeted pass that cannot find its target has not decided the value is safe, it has failed to look, and those two outcomes are otherwise indistinguishable in the output. This costs audit detail in a case that should not occur; the alternative cost is a credential in the log.
+- Paths that are not argument paths are therefore **not** supplied as `matched_fields`. `check_no_secrets_in_args` reports a secret used as a key name, or one found in `reason`, under `metadata["matched_field_labels"]` instead — labelled for the reader, never handed to the walk.
+- A path segment can itself be redacted in the audit record if the segment is an attacker-supplied key that looks secret-shaped. That happens after the targeted pass has run, so redaction still lands on the right value; the operator sees a path with `[REDACTED]` in it.
 
 ---
 
