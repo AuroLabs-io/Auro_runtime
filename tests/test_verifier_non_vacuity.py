@@ -201,9 +201,23 @@ def test_a_subcheck_that_crashes_cannot_report_a_pass():
     finding, so a crashed subcheck contributed nothing to the error count and
     the aggregate stayed green. Error count here is zero for exactly that
     reason, which is why the verdict has to come from the checks.
+
+    Note what this test must not depend on. `classify_text` is called once per
+    line of `git status` output, so patching it to raise proves nothing when the
+    working tree happens to be clean -- the loop body never runs and the check
+    passes for an unrelated reason. An earlier version of this test did exactly
+    that and passed only because the tree was dirty while it was written. Supply
+    the porcelain output so the crash is reached whatever the checkout looks
+    like.
     """
-    with patch.object(vt, "classify_text", side_effect=RuntimeError("boom")):
-        result = vt.verify_security()
+    import subprocess
+
+    staged = subprocess.CompletedProcess(
+        ["git", "status", "--porcelain"], 0, "M  auro_runtime/probe.py\n", ""
+    )
+    with patch.object(vt.subprocess, "run", lambda *a, **k: staged):
+        with patch.object(vt, "classify_text", side_effect=RuntimeError("boom")):
+            result = vt.verify_security()
 
     assert result["passed"] is False
     assert "sensitive_files" in _failed_checks(result)
