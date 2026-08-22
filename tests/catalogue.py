@@ -63,6 +63,12 @@ FILE_PURPOSE = {
         "workspace resolution, protected-path writes, directive exposure sets, MCP "
         "startup enforcement, and the static verifier's source-checkout and encoding "
         "contracts. Every case proves a seam that is closed in shipped code.",
+    "test_verifier_non_vacuity.py":
+        "The verifier is subject to the laws it enforces. Every evidence source "
+        "verify_security() reads is driven to zero or to failure in turn, and the "
+        "aggregate verdict must not stay green — including the cases that raise no "
+        "error finding, where a headline pass used to sit on top of a checks list "
+        "that said the opposite. Passing paths assert numeric counts, not booleans.",
     "test_mcp_auth.py":
         "Bearer-token admission on the streamable-HTTP transport, the runtime's only "
         "network-exposed authentication surface. Covers the verifier's decision across "

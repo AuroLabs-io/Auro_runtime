@@ -1,6 +1,6 @@
 # Test catalogue
 
-**357 test functions** across 15 files.
+**369 test functions** across 16 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -23,12 +23,13 @@ higher.
 | [`tests/test_directives.py`](../tests/test_directives.py) | 23 |
 | [`tests/test_end_to_end.py`](../tests/test_end_to_end.py) | 17 |
 | [`tests/test_security_p0.py`](../tests/test_security_p0.py) | 44 |
+| [`tests/test_verifier_non_vacuity.py`](../tests/test_verifier_non_vacuity.py) | 12 |
 | [`tests/test_mcp_auth.py`](../tests/test_mcp_auth.py) | 9 |
 | [`tests/test_audit_disclosure.py`](../tests/test_audit_disclosure.py) | 27 |
 | [`tests/test_archive_integrity.py`](../tests/test_archive_integrity.py) | 6 |
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 7 |
 | [`tests/test_release_evidence.py`](../tests/test_release_evidence.py) | 11 |
-| **Total** | **357** |
+| **Total** | **369** |
 
 ---
 
@@ -486,6 +487,27 @@ Regression tests for the package-owned authority split: zero-policy refusal, wor
 - **the destination check is actually installed** — The adapter must really replace the connection class.
 - **mounting the guard does not alter other pool managers** — urllib3 assigns pool_classes_by_scheme by reference without copying.
 - **no registered tool issues its own http request** — A tool must not carry a private destination check.
+
+---
+
+## `tests/test_verifier_non_vacuity.py`
+
+The verifier is subject to the laws it enforces. Every evidence source verify_security() reads is driven to zero or to failure in turn, and the aggregate verdict must not stay green — including the cases that raise no error finding, where a headline pass used to sit on top of a checks list that said the opposite. Passing paths assert numeric counts, not booleans.
+
+12 tests.
+
+- **the tree verifies clean** — The anchor. Every negative fixture below is measured against this.
+- **the secret scan reports a non zero file count** — A count, not a boolean.
+- **guard completeness reports non zero rules and guards**
+- **tool schema coverage examined a non empty registry**
+- **a secret scan over zero files cannot report a pass** — The instance this whole file exists for.
+- **zero enforceable rules cannot report a pass** — "0 enforceable rules, all guards present" was literally true and useless.
+- **an empty tool registry cannot report a pass**
+- **a tool without a schema cannot report a pass** — Both branches of this check used to hardcode `passed: True`, so its only
+- **a registered guard bound by no rule cannot report a pass** — The reverse direction. The check proved every rule names a guard that
+- **a failed source control query cannot report a pass** — The original card's headline defect, still live until now: git exits 128 and
+- **a subcheck that crashes cannot report a pass** — A control that reports on a subsystem must not depend on that subsystem
+- **verify output does not pass over a failed static phase** — Same defect one level up. `verify_output` gated the dynamic phase on the
 
 ---
 

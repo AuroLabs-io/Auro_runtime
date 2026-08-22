@@ -199,6 +199,15 @@ def _iter_scannable_files():
             yield p
 
 
+class _SubcheckRecorded(Exception):
+    """
+    Raised by a subcheck that has already appended its own failure.
+
+    Lets a check bail out of its try block without the generic handler
+    recording the same failure a second time under a different detail.
+    """
+
+
 def _make_finding(severity: str, code: str, message: str, file: str = "", line: int = 0) -> dict:
     finding = {"severity": severity, "code": code, "message": message}
     if file:
@@ -206,6 +215,32 @@ def _make_finding(severity: str, code: str, message: str, file: str = "", line: 
     if line:
         finding["line"] = line
     return finding
+
+
+def _summarize_with_checks(findings: list[dict], checks: list[dict]) -> dict:
+    """
+    Build a result whose headline verdict cannot contradict its own checks list.
+
+    The two used to be assembled independently: `_summarize` derived `passed`
+    from findings alone and `checks` was attached afterwards. A subcheck that
+    recorded `passed: False` — because it examined nothing, or because it
+    crashed and its handler recorded the failure without raising a finding —
+    still returned an object reporting `passed: True`. One artifact, two
+    readers, no agreement: a caller reading `result["passed"]` and a caller
+    reading `result["checks"]` got opposite answers from the same value.
+
+    Deriving the aggregate from the checks is what makes that state
+    unconstructible. Fixing each subcheck that happened to reach it would leave
+    the next one free to reach it again, and a subcheck added later would not
+    know the rule existed.
+
+    A check with no `passed` key counts as failed: a result that did not say
+    whether it passed has not said that it did.
+    """
+    result = _summarize(findings)
+    result["checks"] = checks
+    result["passed"] = result["passed"] and all(c.get("passed", False) for c in checks)
+    return result
 
 
 def _summarize(findings: list[dict]) -> dict:
@@ -443,8 +478,7 @@ def verify_code_static() -> dict:
         errors.extend(layout_issues)
 
     all_findings = errors + warnings
-    result = _summarize(all_findings)
-    result["checks"] = checks
+    result = _summarize_with_checks(all_findings, checks)
     return result
 
 
@@ -472,8 +506,7 @@ def verify_code_dynamic() -> dict:
             "passed": True,
             "detail": "Already running inside a verification sandbox; dynamic checks not re-entered.",
         })
-        result = _summarize(errors)
-        result["checks"] = checks
+        result = _summarize_with_checks(errors, checks)
         return result
 
     with _Sandbox() as sandbox:
@@ -561,8 +594,7 @@ def verify_code_dynamic() -> dict:
         except Exception as e:
             checks.append({"name": "test_suite", "passed": False, "detail": str(e)})
 
-    result = _summarize(errors)
-    result["checks"] = checks
+    result = _summarize_with_checks(errors, checks)
     return result
 
 
@@ -662,6 +694,23 @@ def verify_security() -> dict:
             capture_output=True, text=True, timeout=15,
             cwd=str(_root()),
         )
+        if result.returncode != 0:
+            # git exits non-zero and prints nothing to stdout when the tree is
+            # not a repository. The loop below then finds no lines and the check
+            # reported "No sensitive files staged" — an inspection that failed,
+            # scored as an inspection that found nothing.
+            checks.append({
+                "name": "sensitive_files",
+                "passed": False,
+                "detail": f"git status failed (exit {result.returncode}): "
+                          f"{result.stderr.strip()[:200]}",
+            })
+            errors.append(_make_finding(
+                SEVERITY_ERROR, "SOURCE_CONTROL_UNAVAILABLE",
+                "git status failed; staged-file inspection verified nothing.",
+            ))
+            raise _SubcheckRecorded
+
         staged_sensitive = []
         for line in result.stdout.strip().splitlines():
             if not line:
@@ -681,6 +730,8 @@ def verify_security() -> dict:
             errors.extend(staged_sensitive)
         else:
             checks.append({"name": "sensitive_files", "passed": True, "detail": "No sensitive files staged"})
+    except _SubcheckRecorded:
+        pass
     except Exception as e:
         checks.append({"name": "sensitive_files", "passed": False, "detail": str(e)})
 
@@ -693,12 +744,37 @@ def verify_security() -> dict:
         enforceable = get_enforceable_rules(policies)
         guard_reg = get_guard_registry()
         missing_guards = [r.id for r in enforceable if r.guard not in guard_reg]
+        # The reverse direction, which this check never asked about: a guard that
+        # is registered but bound by no rule reads as protection on review and
+        # never runs. Proving one direction and describing it as completeness is
+        # how the unbound half stayed invisible.
+        bound = {r.guard for r in enforceable if r.guard}
+        unbound_guards = sorted(set(guard_reg) - bound)
 
-        if missing_guards:
-            checks.append({"name": "guard_completeness", "passed": False, "detail": missing_guards})
-            errors.append(_make_finding("error", "MISSING_GUARD", f"Missing guards: {missing_guards}"))
+        if not enforceable:
+            # Zero rules satisfied "all guards present" vacuously, and reported
+            # it in those words.
+            checks.append({"name": "guard_completeness", "passed": False,
+                           "detail": "No enforceable rules loaded — guard coverage verified nothing."})
+            errors.append(_make_finding(
+                SEVERITY_ERROR, "NO_ENFORCEABLE_RULES",
+                "Policy set contains no enforceable rules; guard coverage examined nothing.",
+            ))
+        elif missing_guards or unbound_guards:
+            checks.append({"name": "guard_completeness", "passed": False,
+                           "detail": {"rules_naming_absent_guards": missing_guards,
+                                      "registered_but_unbound_guards": unbound_guards}})
+            if missing_guards:
+                errors.append(_make_finding("error", "MISSING_GUARD", f"Missing guards: {missing_guards}"))
+            if unbound_guards:
+                errors.append(_make_finding(
+                    SEVERITY_ERROR, "UNBOUND_GUARD",
+                    f"Registered guards bound by no rule: {unbound_guards}",
+                ))
         else:
-            checks.append({"name": "guard_completeness", "passed": True, "detail": f"{len(enforceable)} enforceable rules, all guards present"})
+            checks.append({"name": "guard_completeness", "passed": True,
+                           "detail": f"{len(enforceable)} enforceable rules, "
+                                     f"{len(guard_reg)} guards, bound in both directions"})
     except Exception as e:
         checks.append({"name": "guard_completeness", "passed": False, "detail": str(e)})
 
@@ -708,16 +784,30 @@ def verify_security() -> dict:
         registry = get_registry()
         no_schema = [name for name, (fn, doc, schema) in registry.items() if schema is None]
 
-        if no_schema:
-            checks.append({"name": "tool_schemas", "passed": True,
+        if not registry:
+            checks.append({"name": "tool_schemas", "passed": False,
+                           "detail": "No tools registered — schema coverage verified nothing."})
+            errors.append(_make_finding(
+                SEVERITY_ERROR, "TOOL_REGISTRY_EMPTY",
+                "Tool registry is empty; schema coverage examined no tools.",
+            ))
+        elif no_schema:
+            # Both branches used to report passed: True, so the only False this
+            # check could produce came from its own except handler — it reported
+            # failure when it crashed and never when the condition it examines
+            # was violated.
+            checks.append({"name": "tool_schemas", "passed": False,
                            "detail": f"{len(no_schema)} tools without schemas: {', '.join(sorted(no_schema))}"})
+            errors.append(_make_finding(
+                SEVERITY_ERROR, "TOOL_SCHEMA_MISSING",
+                f"Tools without args_schema: {', '.join(sorted(no_schema))}",
+            ))
         else:
             checks.append({"name": "tool_schemas", "passed": True, "detail": f"All {len(registry)} tools have schemas"})
     except Exception as e:
         checks.append({"name": "tool_schemas", "passed": False, "detail": str(e)})
 
-    result = _summarize(errors)
-    result["checks"] = checks
+    result = _summarize_with_checks(errors, checks)
     return result
 
 
@@ -747,6 +837,11 @@ def verify_output() -> dict:
     phases = []
     all_findings = []
     static_errors = 0
+    # Tracked separately from the error count because a phase can fail without
+    # raising an error finding — an evidence-empty subcheck is the case that
+    # matters. Gating on the count alone let the dynamic phase run on top of a
+    # static phase that had already reported failure.
+    static_failed = []
 
     # Phase 1: Static code checks
     r = verify_code_static()
@@ -754,6 +849,8 @@ def verify_output() -> dict:
                    "warn_count": r["warn_count"], "checks": r.get("checks", [])})
     all_findings.extend(r.get("findings", []))
     static_errors += r["error_count"]
+    if not r["passed"]:
+        static_failed.append("code_static")
 
     # Phase 2: Security
     r = verify_security()
@@ -761,18 +858,24 @@ def verify_output() -> dict:
                    "warn_count": r["warn_count"], "checks": r.get("checks", [])})
     all_findings.extend(r.get("findings", []))
     static_errors += r["error_count"]
+    if not r["passed"]:
+        static_failed.append("security")
 
     # Phase 3: Dynamic code checks — only if static phases are clean
-    if static_errors > 0:
+    if static_errors > 0 or static_failed:
+        reason = (
+            f"Skipped — {static_errors} error(s) in static phases must be resolved first"
+            if static_errors
+            else f"Skipped — static phase(s) reported failure: {', '.join(static_failed)}"
+        )
         phases.append({
             "phase": "code_dynamic",
             "passed": False,
             "skipped": True,
-            "reason": f"Skipped — {static_errors} error(s) in static phases must be resolved first",
+            "reason": reason,
         })
         all_findings.append(_make_finding(
-            SEVERITY_WARN, "DYNAMIC_SKIPPED",
-            f"Dynamic checks skipped due to {static_errors} static error(s)",
+            SEVERITY_WARN, "DYNAMIC_SKIPPED", reason,
         ))
     else:
         r = verify_code_dynamic()
@@ -784,4 +887,8 @@ def verify_output() -> dict:
 
     result = _summarize(all_findings)
     result["phases"] = phases
+    # Same rule as _summarize_with_checks, one level up: the orchestrator's
+    # verdict must not contradict the phases it reports. A skipped dynamic phase
+    # is not a passed one.
+    result["passed"] = result["passed"] and all(ph.get("passed", False) for ph in phases)
     return result

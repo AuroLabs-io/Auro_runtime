@@ -525,7 +525,7 @@ result = verify_output()
 print(result["passed"], result["error_count"], result["warn_count"])
 ```
 
- `passed` returns true when no finding carries error severity, so warnings do not fail a run. Every `detail` reports what the check covered rather than only whether it passed and a scope of zero is recorded as a failure rather than as a clean result. 
+ `passed` returns true only when no finding carries error severity **and** every subcheck in `checks` reported a pass. The second half matters because a subcheck can fail without raising an error finding — one that examined nothing, or one whose own inspection crashed — and those used to leave a headline `passed: true` sitting on top of a `checks` list that said the opposite. Warnings still do not fail a run on their own. Every `detail` reports what the check covered rather than only whether it passed, and a scope of zero is recorded as a failure rather than as a clean result: an empty secret scan, a policy set with no enforceable rules, an empty tool registry, or a `git status` that exits non-zero all fail the run. `tests/test_verifier_non_vacuity.py` is the gate that proves it, driving each evidence source to zero in turn. 
 
 Example output:
 
