@@ -173,7 +173,12 @@ class _ApiKeyTokenVerifier:
 
         if not _MCP_API_KEY:
             return None
-        if not secrets.compare_digest(token, _MCP_API_KEY):
+        # Compare bytes, not str: compare_digest refuses non-ASCII str operands
+        # with TypeError, and the token is whatever the client put on the wire.
+        # Refusing a caller and crashing on one are different outcomes, and only
+        # the first is a decision. The key is ASCII-checked at startup, so the
+        # two sides cannot encode to different bytes for the same characters.
+        if not secrets.compare_digest(token.encode("utf-8"), _MCP_API_KEY.encode("utf-8")):
             return None
         return AccessToken(
             token=token,

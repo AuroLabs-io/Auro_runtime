@@ -424,7 +424,7 @@ python -m auro_runtime mcp \
   --public-url https://auro.example.com
 ```
 
-`AURO_MCP_API_KEY` is mandatory on this transport. The process exits rather than start an unauthenticated listener. Binding a non-loopback host additionally requires `--public-url`, since the auth metadata has to advertise an address a client can actually reach.
+`AURO_MCP_API_KEY` is mandatory on this transport, and must be ASCII. The process exits rather than start an unauthenticated listener, and exits rather than start one whose key cannot be compared: the `Authorization` header arrives decoded as latin-1 while the environment is decoded by the OS, so outside ASCII the two disagree and no token could ever match. Binding a non-loopback host additionally requires `--public-url`, since the auth metadata has to advertise an address a client can actually reach.
 
 That URL says `https`, and the runtime does not terminate TLS. This example assumes a reverse proxy in front of it holding the certificate and forwarding to port 8001. Binding `0.0.0.0` without one puts the bearer token in cleartext on every request.
 

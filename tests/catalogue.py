@@ -63,6 +63,12 @@ FILE_PURPOSE = {
         "workspace resolution, protected-path writes, directive exposure sets, MCP "
         "startup enforcement, and the static verifier's source-checkout and encoding "
         "contracts. Every case proves a seam that is closed in shipped code.",
+    "test_mcp_auth.py":
+        "Bearer-token admission on the streamable-HTTP transport, the runtime's only "
+        "network-exposed authentication surface. Covers the verifier's decision across "
+        "token shapes and both key states, the header parsing one layer above it, and "
+        "the startup checks the comparison depends on. Refusing a caller and crashing "
+        "on one are scored as different outcomes.",
     "test_audit_disclosure.py":
         "Public contracts for the versioned audit envelope and the shared sanitizer "
         "used at audit, executor, transcript, router, model-context, and logging "

@@ -76,6 +76,14 @@ def main():
             if not mcp_server._MCP_API_KEY:
                 print("ERROR: AURO_MCP_API_KEY must be set for streamable-http transport.", file=sys.stderr)
                 sys.exit(1)
+            if not mcp_server._MCP_API_KEY.isascii():
+                # The header arrives decoded as latin-1 and the environment is
+                # decoded by the OS. Outside ASCII those two disagree, so a
+                # non-ASCII key would start a listener whose token comparison can
+                # never match -- an auth control that reads as working and admits
+                # nobody. Refuse the key rather than serve the empty gate.
+                print("ERROR: AURO_MCP_API_KEY must be ASCII.", file=sys.stderr)
+                sys.exit(1)
             public_url = args.public_url
             if public_url is None:
                 if args.host not in {"127.0.0.1", "localhost", "::1"}:

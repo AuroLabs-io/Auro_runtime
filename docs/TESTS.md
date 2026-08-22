@@ -1,6 +1,6 @@
 # Test catalogue
 
-**348 test functions** across 14 files.
+**357 test functions** across 15 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -23,11 +23,12 @@ higher.
 | [`tests/test_directives.py`](../tests/test_directives.py) | 23 |
 | [`tests/test_end_to_end.py`](../tests/test_end_to_end.py) | 17 |
 | [`tests/test_security_p0.py`](../tests/test_security_p0.py) | 44 |
+| [`tests/test_mcp_auth.py`](../tests/test_mcp_auth.py) | 9 |
 | [`tests/test_audit_disclosure.py`](../tests/test_audit_disclosure.py) | 27 |
 | [`tests/test_archive_integrity.py`](../tests/test_archive_integrity.py) | 6 |
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 7 |
 | [`tests/test_release_evidence.py`](../tests/test_release_evidence.py) | 11 |
-| **Total** | **348** |
+| **Total** | **357** |
 
 ---
 
@@ -485,6 +486,24 @@ Regression tests for the package-owned authority split: zero-policy refusal, wor
 - **the destination check is actually installed** — The adapter must really replace the connection class.
 - **mounting the guard does not alter other pool managers** — urllib3 assigns pool_classes_by_scheme by reference without copying.
 - **no registered tool issues its own http request** — A tool must not carry a private destination check.
+
+---
+
+## `tests/test_mcp_auth.py`
+
+Bearer-token admission on the streamable-HTTP transport, the runtime's only network-exposed authentication surface. Covers the verifier's decision across token shapes and both key states, the header parsing one layer above it, and the startup checks the comparison depends on. Refusing a caller and crashing on one are scored as different outcomes.
+
+9 tests.
+
+- **a correctly configured token is accepted** — The non-vacuity anchor for every rejection case below.
+- **a token that is not the configured one is refused** — Refused by returning None, and without raising -- see the next test.
+- **refusing a token never raises** — Returning None and raising are not the same refusal.
+- **an unconfigured key refuses rather than admits** — Valence, stated because the same empty value could defensibly mean either.
+- **a correct bearer header admits the caller** — The transport-level non-vacuity anchor, for the same reason as above.
+- **a header that does not carry the configured token is refused** — Covers the close condition's "malformed or absent Authorization header",
+- **an unconfigured key refuses a well formed bearer header** — Fail-closed survives the layer above: a valid-looking header still fails.
+- **a non ascii api key is refused at startup** — The header and the environment are decoded by two different parsers.
+- **an absent api key is refused at startup** — The pre-existing guard, pinned here beside the one added next to it.
 
 ---
 
