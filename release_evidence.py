@@ -51,6 +51,14 @@ class SourceIdentity:
     commit_tree: str
     index_tree: str
     status: str = "clean"
+    # What the evidence is evidence *for*. The three ids above bind a tree; none
+    # of them says whether this repository would ever publish it. CI runs this
+    # gate on every push and on pull requests, so most runs are for a feature
+    # branch or for a refs/pull/N/merge commit that exists only inside GitHub --
+    # and without these two fields every one of those produced a record
+    # indistinguishable from a real release candidate.
+    ref: str | None = None
+    publication_candidate: bool = False
 
 
 def _run(
@@ -92,12 +100,42 @@ def _git(repo_root: Path, *args: str) -> str:
     ).stdout.strip()
 
 
-def inspect_source_identity(repo_root: Path, expected_commit: str) -> SourceIdentity:
-    """Refuse unless HEAD, index, and the clean checkout are one named commit."""
+def inspect_source_identity(
+    repo_root: Path,
+    expected_commit: str,
+    source_ref: str | None = None,
+    publication_candidate: bool = False,
+) -> SourceIdentity:
+    """
+    Refuse unless HEAD, index, and the clean checkout are one named commit.
+
+    ``source_ref`` is recorded verbatim and ``publication_candidate`` is the
+    caller's assertion that the ref is one this repository publishes from. This
+    command cannot know that on its own: the publishable branch is repository
+    policy, and a branch list hardcoded here would be an inventory maintained by
+    hand wearing the costume of a control. Recording the ref beside the
+    assertion is what makes the assertion auditable.
+
+    The valence of omission is refusal. An unlabelled run is **not** a
+    publication candidate, because the failure that matters is a record for a
+    tree nobody will publish being mistaken for a release candidate, and that
+    failure needs the flag to default the other way.
+    """
     repo_root = repo_root.resolve()
     if _FULL_COMMIT.fullmatch(expected_commit) is None:
         raise ReleaseEvidenceError(
             "expected commit must be the full 40-character Git object id"
+        )
+
+    ref = source_ref or None
+    if publication_candidate and ref is not None and ref.startswith("refs/pull/"):
+        # The one wrong combination recognisable without knowing branch policy.
+        # A pull-request ref names a commit that lives only inside GitHub and
+        # will never appear in published history, so asserting it is publishable
+        # is always a mistake. Refuse rather than record it: a record carrying a
+        # contradiction is worse than one that declines to be written.
+        raise ReleaseEvidenceError(
+            f"pull-request ref {ref} cannot be a publication candidate"
         )
 
     commit = _git(repo_root, "rev-parse", "--verify", "HEAD^{commit}").lower()
@@ -124,6 +162,8 @@ def inspect_source_identity(repo_root: Path, expected_commit: str) -> SourceIden
         commit=commit,
         commit_tree=commit_tree,
         index_tree=index_tree,
+        ref=ref,
+        publication_candidate=bool(publication_candidate),
     )
 
 
@@ -298,11 +338,15 @@ def build_release_evidence(
     expected_commit: str,
     output_dir: Path,
     private_pack: Path | None = None,
+    source_ref: str | None = None,
+    publication_candidate: bool = False,
 ) -> Path:
     """Build, test, and report one commit-bound publication candidate."""
     repo_root = repo_root.resolve()
     output_dir = output_dir.resolve()
-    identity = inspect_source_identity(repo_root, expected_commit)
+    identity = inspect_source_identity(
+        repo_root, expected_commit, source_ref, publication_candidate
+    )
 
     if output_dir.exists() and any(output_dir.iterdir()):
         raise ReleaseEvidenceError(
@@ -375,7 +419,9 @@ def build_release_evidence(
                 "candidate artifacts changed while the distribution matrix ran"
             )
 
-        final_identity = inspect_source_identity(repo_root, expected_commit)
+        final_identity = inspect_source_identity(
+            repo_root, expected_commit, source_ref, publication_candidate
+        )
         if final_identity != identity:
             raise ReleaseEvidenceError(
                 "source identity changed while release evidence was being produced"
@@ -444,6 +490,23 @@ def _parser() -> argparse.ArgumentParser:
         help="empty directory that receives the verified artifacts and evidence",
     )
     parser.add_argument(
+        "--source-ref",
+        default=None,
+        help=(
+            "the ref this build was triggered for, recorded verbatim so the "
+            "--publication-candidate assertion beside it can be audited"
+        ),
+    )
+    parser.add_argument(
+        "--publication-candidate",
+        action="store_true",
+        help=(
+            "assert that --source-ref is one this repository publishes from. "
+            "Omitted means no: an unlabelled run is recorded as evidence for a "
+            "tree, not as a release candidate"
+        ),
+    )
+    parser.add_argument(
         "--private-pack",
         type=Path,
         default=None,
@@ -464,6 +527,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.expected_commit,
             args.output_dir,
             args.private_pack,
+            args.source_ref,
+            args.publication_candidate,
         )
     except ReleaseEvidenceError as exc:
         print(f"release evidence refused: {exc}", file=sys.stderr)

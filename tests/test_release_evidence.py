@@ -205,3 +205,89 @@ def test_private_pack_that_runs_nothing_is_not_a_pass(tmp_path):
         _run_private_pack(root, pack)
 
     assert "passed" not in str(caught.value).replace("did not pass", "")
+
+
+# --- What the evidence is evidence *for* -----------------------------------
+#
+# The identity check binds a commit, its tree and the index. None of that says
+# whether the commit is one this repository would ever publish. CI runs the gate
+# on every push and on pull requests, so most runs are for a feature branch or
+# for a `refs/pull/N/merge` commit that exists only as a GitHub ref -- and every
+# one of them produced a record indistinguishable from a real release candidate.
+# That is the failure this whole gate exists to prevent, reached from the other
+# side: evidence bound to a tree nobody will publish.
+
+PUBLISHABLE_REFS = [
+    pytest.param("refs/heads/main", id="default-branch"),
+    pytest.param("refs/tags/v0.1.0", id="release-tag"),
+]
+
+UNPUBLISHABLE_REFS = [
+    pytest.param("refs/pull/7/merge", id="pull-request-merge"),
+    pytest.param("refs/pull/7/head", id="pull-request-head"),
+    pytest.param(None, id="ref-not-supplied"),
+    pytest.param("", id="ref-empty"),
+    pytest.param("HEAD", id="detached-head"),
+    pytest.param("refs/heads/harden/some-branch", id="feature-branch"),
+]
+
+
+def test_the_source_ref_reaches_the_record_verbatim(committed_repo):
+    """The ref is what makes the publication claim auditable, so it is recorded as given."""
+    repo, commit = committed_repo
+
+    identity = inspect_source_identity(
+        repo, commit, source_ref="refs/heads/main", publication_candidate=True
+    )
+
+    assert identity.ref == "refs/heads/main"
+
+
+@pytest.mark.parametrize("ref", PUBLISHABLE_REFS)
+def test_an_asserted_publishable_ref_is_recorded_as_a_candidate(committed_repo, ref):
+    """
+    The non-vacuity anchor for every case below.
+
+    A field hardcoded `False` satisfies all of them, and nothing would show.
+    """
+    repo, commit = committed_repo
+
+    identity = inspect_source_identity(
+        repo, commit, source_ref=ref, publication_candidate=True
+    )
+
+    assert identity.publication_candidate is True
+
+
+@pytest.mark.parametrize("ref", UNPUBLISHABLE_REFS)
+def test_a_ref_nobody_asserted_is_not_a_publication_candidate(committed_repo, ref):
+    """
+    Fail closed, and state the valence: an unlabelled run is not a candidate.
+
+    `release_evidence.py` cannot know which branch a repository publishes from
+    without guessing it, and a guessed branch list would be an inventory
+    maintained by hand wearing the costume of a control. The caller asserts;
+    omission, an empty value and an unrecognised value all resolve to false.
+    """
+    repo, commit = committed_repo
+
+    identity = inspect_source_identity(repo, commit, source_ref=ref)
+
+    assert identity.publication_candidate is False
+
+
+def test_a_pull_request_ref_cannot_be_asserted_as_a_publication_candidate(committed_repo):
+    """
+    The one wrong combination that needs no branch policy to recognise.
+
+    A pull-request ref names a commit that exists only inside GitHub and will
+    never appear in published history, so asserting it is publishable is always a
+    mistake. Refused rather than recorded, because a record that carries a
+    contradiction is worse than one that refuses to be written.
+    """
+    repo, commit = committed_repo
+
+    with pytest.raises(ReleaseEvidenceError, match="pull-request ref"):
+        inspect_source_identity(
+            repo, commit, source_ref="refs/pull/7/merge", publication_candidate=True
+        )

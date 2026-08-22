@@ -47,14 +47,40 @@ jobs:
           cache: pip
       - name: Install release dependencies
         run: python -m pip install --upgrade pip ".[dev]" build twine
-      - name: Build and verify the commit-bound publication candidate
+      # Decide once what this run is evidence for. The retained artifact's name
+      # and the record's publication_candidate field are two readers of that one
+      # fact, and computing them separately is how they come to disagree. This
+      # gate runs on every push and on pull requests, so most runs are for a
+      # branch or a refs/pull/N/merge commit that will never be published --
+      # correct to verify, wrong to file under the same name as a release.
+      - name: Classify the source ref
+        id: candidate
+        env:
+          SOURCE_REF: ${{ github.ref }}
+        run: |
+          case "$SOURCE_REF" in
+            refs/heads/main|refs/tags/*)
+              echo "flag=--publication-candidate" >> "$GITHUB_OUTPUT"
+              echo "label=publication-candidate" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "flag=" >> "$GITHUB_OUTPUT"
+              echo "label=verification-only" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+      - name: Build and verify the commit-bound candidate
+        env:
+          SOURCE_REF: ${{ github.ref }}
+          EXPECTED_COMMIT: ${{ github.sha }}
         run: >-
           python -B release_evidence.py
-          --expected-commit "${{ github.sha }}"
+          --expected-commit "$EXPECTED_COMMIT"
+          --source-ref "$SOURCE_REF"
+          ${{ steps.candidate.outputs.flag }}
           --output-dir dist
       - name: Retain the verified candidate and its evidence record
         uses: actions/upload-artifact@v6
         with:
-          name: publication-candidate-${{ github.sha }}
+          name: ${{ steps.candidate.outputs.label }}-${{ github.sha }}
           path: dist/
           if-no-files-found: error

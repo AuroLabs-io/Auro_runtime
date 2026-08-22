@@ -1,6 +1,6 @@
 # Test catalogue
 
-**369 test functions** across 16 files.
+**373 test functions** across 16 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -28,8 +28,8 @@ higher.
 | [`tests/test_audit_disclosure.py`](../tests/test_audit_disclosure.py) | 27 |
 | [`tests/test_archive_integrity.py`](../tests/test_archive_integrity.py) | 6 |
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 7 |
-| [`tests/test_release_evidence.py`](../tests/test_release_evidence.py) | 11 |
-| **Total** | **369** |
+| [`tests/test_release_evidence.py`](../tests/test_release_evidence.py) | 15 |
+| **Total** | **373** |
 
 ---
 
@@ -606,7 +606,7 @@ Builds a real wheel and sdist, installs each into an isolated environment, and r
 
 Pins the publication gate to one explicit Git commit and tree. A dirty checkout, a different expected commit, or ambient source content must not produce release evidence for the reviewed tree.
 
-11 tests.
+15 tests.
 
 - **release identity binds head index and commit tree**
 - **release identity refuses a different expected commit**
@@ -619,3 +619,7 @@ Pins the publication gate to one explicit Git commit and tree. A dirty checkout,
 - **private pack verdict records a nonzero count**
 - **a failing private pack refuses without disclosing the case** — The disclosure control, not just the refusal.
 - **private pack that runs nothing is not a pass** — A pack that proved nothing must not be recorded as one that passed.
+- **the source ref reaches the record verbatim** — The ref is what makes the publication claim auditable, so it is recorded as given.
+- **an asserted publishable ref is recorded as a candidate** — The non-vacuity anchor for every case below.
+- **a ref nobody asserted is not a publication candidate** — Fail closed, and state the valence: an unlabelled run is not a candidate.
+- **a pull request ref cannot be asserted as a publication candidate** — The one wrong combination that needs no branch policy to recognise.
