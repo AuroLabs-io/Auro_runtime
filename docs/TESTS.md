@@ -1,6 +1,6 @@
 # Test catalogue
 
-**342 test functions** across 14 files.
+**348 test functions** across 14 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -26,8 +26,8 @@ higher.
 | [`tests/test_audit_disclosure.py`](../tests/test_audit_disclosure.py) | 27 |
 | [`tests/test_archive_integrity.py`](../tests/test_archive_integrity.py) | 6 |
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 7 |
-| [`tests/test_release_evidence.py`](../tests/test_release_evidence.py) | 5 |
-| **Total** | **342** |
+| [`tests/test_release_evidence.py`](../tests/test_release_evidence.py) | 11 |
+| **Total** | **348** |
 
 ---
 
@@ -565,10 +565,16 @@ Builds a real wheel and sdist, installs each into an isolated environment, and r
 
 Pins the publication gate to one explicit Git commit and tree. A dirty checkout, a different expected commit, or ambient source content must not produce release evidence for the reviewed tree.
 
-5 tests.
+11 tests.
 
 - **release identity binds head index and commit tree**
 - **release identity refuses a different expected commit**
 - **release identity refuses untracked or modified source**
 - **commit export excludes ambient working tree content**
 - **distribution evidence requires a nonzero passed count**
+- **private pack is identified by digest and never by name**
+- **private pack digest binds to content**
+- **private pack refuses a directory with no test modules**
+- **private pack verdict records a nonzero count**
+- **a failing private pack refuses without disclosing the case** — The disclosure control, not just the refusal.
+- **private pack that runs nothing is not a pass** — A pack that proved nothing must not be recorded as one that passed.

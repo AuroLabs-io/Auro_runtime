@@ -9,6 +9,12 @@ expected commit tree, exports that commit with ``git archive``, builds wheel and
 sdist from the export, and runs the mandatory distribution matrix against those
 exact files.  Only after every gate passes are the artifacts and their evidence
 record copied to the requested output directory.
+
+A withheld regression suite may be supplied with ``--private-pack``.  It runs
+inside the export, so it is bound to the same commit as the artifacts by
+construction rather than by assertion, and it is identified in the record by
+digest alone.  It cannot be supplied by CI, which is why its absence is recorded
+as ``release_complete: false`` instead of being left to look like a pass.
 """
 
 from __future__ import annotations
@@ -216,10 +222,82 @@ def _pytest_evidence(stdout: str) -> dict[str, object]:
     return {"passed": True, "test_count": passed, "summary": summary}
 
 
+def _private_pack_identity(pack_dir: Path) -> dict[str, object]:
+    """Identify the pack by digest alone.
+
+    Deliberately records no filenames.  The pack is withheld because its
+    contents are transferable technique, and its filenames describe those
+    contents, so naming them in a record that travels with a published artifact
+    would republish the part that matters.  A digest is checkable by anyone
+    holding the pack and says nothing to anyone who does not.
+    """
+    files = sorted(path for path in pack_dir.glob("test_*.py") if path.is_file())
+    if not files:
+        raise ReleaseEvidenceError(
+            f"no test modules found in the supplied private pack: {pack_dir}"
+        )
+    hashes = sorted(_sha256(path) for path in files)
+    combined = hashlib.sha256("".join(hashes).encode("ascii")).hexdigest()
+    return {"file_count": len(files), "file_sha256": hashes, "digest": combined}
+
+
+def _run_private_pack(source_root: Path, pack_dir: Path) -> dict[str, object]:
+    """Run the withheld pack against the exported commit and return a verdict.
+
+    The binding item 4 asks for is structural rather than asserted: the pack runs
+    inside the ``git archive`` export, so it cannot execute against different
+    source than the artifacts were built from.
+
+    Output handling is not the usual ``_run`` path.  A failing case in this pack
+    prints its own parametrized id, and those ids are the payloads, so neither a
+    traceback nor a node id may reach the evidence record or the operator's
+    terminal.  Tracebacks are suppressed at the runner and only the final
+    summary line -- counts, never names -- is retained.  An operator diagnosing
+    a failure re-runs the pack locally, where the full output is safe.
+    """
+    identity = _private_pack_identity(pack_dir)
+    target = source_root / "tests" / "local"
+    target.mkdir(parents=True, exist_ok=True)
+    for path in sorted(pack_dir.glob("test_*.py")):
+        shutil.copy2(path, target / path.name)
+
+    try:
+        result = subprocess.run(
+            [
+                sys.executable, "-B", "-m", "pytest",
+                "tests/local",
+                "-o", "addopts=",
+                "-q", "--tb=no", "-p", "no:cacheprovider",
+            ],
+            cwd=source_root,
+            text=True,
+            capture_output=True,
+            timeout=900,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ReleaseEvidenceError("private pack could not complete") from exc
+
+    summary = _last_nonempty_line(result.stdout)
+    if result.returncode != 0:
+        raise ReleaseEvidenceError(f"private pack did not pass: {summary}")
+
+    match = _PYTEST_PASSED.search(summary)
+    if match is None:
+        raise ReleaseEvidenceError(
+            f"private pack returned success without a passed-test count: {summary}"
+        )
+    passed = int(match.group("count"))
+    if passed == 0:
+        raise ReleaseEvidenceError("private pack ran zero passing tests")
+
+    return {"status": "passed", "test_count": passed, "summary": summary, **identity}
+
+
 def build_release_evidence(
     repo_root: Path,
     expected_commit: str,
     output_dir: Path,
+    private_pack: Path | None = None,
 ) -> Path:
     """Build, test, and report one commit-bound publication candidate."""
     repo_root = repo_root.resolve()
@@ -284,6 +362,14 @@ def build_release_evidence(
         )
         distribution_evidence = _pytest_evidence(test_result.stdout)
 
+        if private_pack is not None:
+            private_pack_evidence = _run_private_pack(source_root, private_pack)
+        else:
+            private_pack_evidence = {
+                "status": "not_run",
+                "reason": "no private pack supplied to this run",
+            }
+
         if _artifact_records(candidate_dir) != artifact_records:
             raise ReleaseEvidenceError(
                 "candidate artifacts changed while the distribution matrix ran"
@@ -315,7 +401,15 @@ def build_release_evidence(
                 "clean_before_and_after": True,
                 "twine_check": "passed",
                 "distribution_matrix": distribution_evidence,
+                "private_pack": private_pack_evidence,
             },
+            # Every gate ran and passed, or this candidate is not publishable.
+            # A gate that did not run has not decided the candidate is sound, it
+            # has failed to look, and the two must not be indistinguishable in
+            # the record.  CI cannot supply the private pack, so its retained
+            # candidates are correctly marked incomplete rather than silently
+            # counted as verified.
+            "release_complete": private_pack_evidence["status"] == "passed",
             "build_summary": _last_nonempty_line(build_result.stdout),
         }
         evidence_path = output_dir / "release-evidence.json"
@@ -349,6 +443,16 @@ def _parser() -> argparse.ArgumentParser:
         default=Path("dist"),
         help="empty directory that receives the verified artifacts and evidence",
     )
+    parser.add_argument(
+        "--private-pack",
+        type=Path,
+        default=None,
+        help=(
+            "directory holding the withheld regression suite; without it the "
+            "record is marked release_complete: false rather than reporting a "
+            "gate that did not run as one that passed"
+        ),
+    )
     return parser
 
 
@@ -359,6 +463,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.repo_root,
             args.expected_commit,
             args.output_dir,
+            args.private_pack,
         )
     except ReleaseEvidenceError as exc:
         print(f"release evidence refused: {exc}", file=sys.stderr)
