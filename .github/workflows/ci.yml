@@ -53,7 +53,7 @@ jobs:
           --expected-commit "${{ github.sha }}"
           --output-dir dist
       - name: Retain the verified candidate and its evidence record
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: publication-candidate-${{ github.sha }}
           path: dist/
