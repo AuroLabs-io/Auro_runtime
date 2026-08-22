@@ -15,11 +15,8 @@ that make the pair of enforcement layers worth having:
     subject would rebuild the defect, because on 2026-08-16 both layers compared
     a raw model-supplied string and one trailing space opened both at once.
 
-Public rather than restricted under D-043. Every case here is a fact about this
-repository's own inventory and normalisation -- which families it holds, which
-non-secrets it must not refuse -- and teaches nothing transferable about
-defeating path validation in general. The traversal and evasion corpora stay in
-the restricted pack.
+Every case here is a fact about this repository's own inventory and
+normalisation -- which families it holds, which non-secrets it must not refuse.
 """
 
 import json

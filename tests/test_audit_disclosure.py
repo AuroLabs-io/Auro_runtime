@@ -1,7 +1,7 @@
 """Public contracts for the audit envelope and secret-safe outbound boundaries.
 
 The fixtures use one ordinary synthetic marker and assert absence plus benign
-positive controls.  Scanner-evasion techniques remain in the restricted suite.
+positive controls.
 """
 
 from __future__ import annotations

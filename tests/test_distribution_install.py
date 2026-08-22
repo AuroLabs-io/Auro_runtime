@@ -580,10 +580,8 @@ def test_sdist_excludes_tests_and_builds_the_same_authority_set(
         "docs/FAQ.md",
         "docs/TESTS.md",
     } <= members
-    # docs/TESTS.md is the generated public catalogue: RESTRICTED_FILES in
-    # tests/catalogue.py guarantees it never names a withheld test module, so
-    # shipping it no longer risks disclosure. The README links to it, and the
-    # link should resolve inside the sdist as well as on GitHub.
+    # docs/TESTS.md is the generated catalogue of the suite. The README links to
+    # it, and the link should resolve inside the sdist as well as on GitHub.
     #
     # docs/DIRECTIVES.md is the same arrangement for directives, and shipping it
     # matters more: it is the only enumeration of what tool authority each

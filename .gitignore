@@ -32,9 +32,7 @@ auro_secrets.yaml
 .auro_secrets.yaml
 auro_audit.jsonl
 
-# Adversarial suites, withheld from publication (already named by
-# RESTRICTED_FILES in tests/catalogue.py). Kept locally so they run, never
-# committed: their payloads would double as an attack corpus. The canonical
-# copy lives outside this repo — `git clean -fdx` removes ignored files.
-tests/test_file_tools_safety.py
-tests/test_secret_scanning_evasions.py
+# Local-only test material. Runs with the suite, never ships. Nothing in here is
+# tracked, so `git clean -fdx` deletes it and git will not bring it back --
+# keep a copy somewhere outside this repository.
+tests/local/

@@ -18,8 +18,8 @@ TESTS_DIR = REPO_ROOT / "tests"
 OUTPUT = REPO_ROOT / "docs" / "TESTS.md"
 
 # What each file is responsible for. Keyed by filename; collect() refuses to
-# run for any test_*.py file that has neither an entry here nor an entry in
-# RESTRICTED_FILES below, rather than publishing it unlabelled.
+# run for any test_*.py file with no entry here, rather than publishing it
+# unlabelled.
 FILE_PURPOSE = {
     "test_policy_validation.py":
         "Policy loading and fail-hard validation. The regression barrier for the "
@@ -42,9 +42,7 @@ FILE_PURPOSE = {
         "The single sensitive-resource inventory and both layers that consume it. "
         "Covers that the policy guard and the file tool agree on every family and "
         "category, that the tool classifies the resolved path rather than the "
-        "basename, and that normalisation is host-independent. Facts about this "
-        "repository's own inventory; the traversal and evasion corpora stay "
-        "restricted.",
+        "basename, and that normalisation is host-independent.",
     "test_credentials.py":
         "Alias resolution and delivery. The property under test throughout is that "
         "a resolved secret never appears in a tool result, an error message, or the "
@@ -68,8 +66,7 @@ FILE_PURPOSE = {
     "test_audit_disclosure.py":
         "Public contracts for the versioned audit envelope and the shared sanitizer "
         "used at audit, executor, transcript, router, model-context, and logging "
-        "boundaries. Uses only an ordinary synthetic marker; scanner-evasion probes "
-        "remain in the restricted suite.",
+        "boundaries. Uses only an ordinary synthetic marker.",
     "test_archive_integrity.py":
         "Soft delete keeps its promise: an archived file is never destroyed by a "
         "later one. Archive names carry the directory so same-named files cannot "
@@ -88,28 +85,6 @@ FILE_PURPOSE = {
 }
 
 FILE_ORDER = list(FILE_PURPOSE)
-
-# --- Public/private classification --------------------------------------------
-#
-# Some test files encode transferable attack tradecraft (path-traversal
-# payloads, prefix-confusion tricks) that stays useful against any codebase's
-# naive path validation regardless of whether this project's own instance is
-# fixed. Publishing that teaches technique, not just proof that Auro's own
-# seams are closed. That is a different, higher-cost kind of disclosure than a
-# regression test for a seam that no longer exists in shipped code, so each
-# file here was reviewed individually rather than classified by convention or
-# filename pattern.
-#
-# A file that is neither classified public (has a FILE_PURPOSE entry) nor
-# named here is UNCLASSIFIED, and the generator refuses to run rather than
-# guess. A new test file must be a deliberate publish-or-withhold decision,
-# never a default — see OT-public-test-disclosure-could-publish-an-exploit-
-# catalogue in the vault for the review this list came from.
-RESTRICTED_FILES = frozenset({
-    "test_file_tools_safety.py",       # general path-validation attack corpus
-    "test_secret_scanning_evasions.py",  # general scanner-evasion techniques, split out of test_enforcement.py
-    "test_egress_evasions.py",         # general SSRF host-encoding corpus; the four named bypasses publish from test_security_p0.py
-})
 
 
 def _first_line(node) -> str:
@@ -131,27 +106,23 @@ class UnclassifiedTestFile(SystemExit):
     def __init__(self, names: list[str]):
         listed = "\n".join(f"  - {n}" for n in names)
         super().__init__(
-            f"{len(names)} test file(s) are neither classified public (a FILE_PURPOSE "
-            f"entry in tests/catalogue.py) nor listed in RESTRICTED_FILES:\n{listed}\n\n"
-            f"This must be a deliberate decision, not a default. Review the file against "
-            f"OT-public-test-disclosure-could-publish-an-exploit-catalogue in the vault, "
-            f"then add it to FILE_PURPOSE to publish it or to RESTRICTED_FILES to withhold "
-            f"it."
+            f"{len(names)} test file(s) have no FILE_PURPOSE entry in "
+            f"tests/catalogue.py:\n{listed}\n\n"
+            f"Every test file that ships is described in the catalogue, and what a "
+            f"file covers is a decision rather than something to infer from its "
+            f"name. Add an entry describing what it is responsible for."
         )
 
 
 def collect() -> dict:
     """{filename: [(class_or_None, test_name, docstring_first_line), ...]}
 
-    Restricted files (see RESTRICTED_FILES) are skipped entirely: not counted,
-    not named, not present in the output. An unclassified file halts
-    generation rather than silently publishing under a placeholder purpose.
+    A file with no FILE_PURPOSE entry halts generation rather than being
+    published under a placeholder purpose.
     """
     found = {}
     unclassified = []
     for path in sorted(TESTS_DIR.glob("test_*.py")):
-        if path.name in RESTRICTED_FILES:
-            continue
         if path.name not in FILE_PURPOSE:
             unclassified.append(path.name)
             continue
@@ -174,7 +145,7 @@ def collect() -> dict:
 
 def render(found: dict) -> str:
     # Every key in `found` has a FILE_PURPOSE entry by construction: collect()
-    # excludes restricted files and refuses to run for an unclassified one.
+    # refuses to run for a file that has none.
     total = sum(len(v) for v in found.values())
     ordered = [f for f in FILE_ORDER if f in found]
 
@@ -189,10 +160,6 @@ def render(found: dict) -> str:
         "test in the published suite and what it asserts. Parametrized tests are counted",
         "once here and expand to more cases at run time, so the number pytest reports is",
         "higher.",
-        "",
-        "This catalogue covers what ships. A separate adversarial pack is withheld from",
-        "publication and is neither counted nor named here; it does not run in CI, and no",
-        "result in this repository depends on it.",
         "",
         "## Summary",
         "",

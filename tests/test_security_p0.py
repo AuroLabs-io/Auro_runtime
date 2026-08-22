@@ -867,11 +867,8 @@ def test_secret_scan_covers_release_manifest_and_ci_workflows(
 # ---------------------------------------------------------------------------
 # Destination control for outbound HTTP.
 #
-# The four bypasses named in OT-http-request-destination-is-unenforced's close
-# condition, each proven closed against the real requests stack. The wider
-# corpus of evasion encodings lives in test_egress_evasions.py, which is
-# RESTRICTED under D-043: these four are proof-of-fix for a closed Auro seam,
-# the corpus is transferable technique.
+# The four bypasses named in this control's close condition, each proven closed
+# against the real requests stack.
 # ---------------------------------------------------------------------------
 
 

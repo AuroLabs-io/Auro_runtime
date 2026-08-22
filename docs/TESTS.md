@@ -9,10 +9,6 @@ test in the published suite and what it asserts. Parametrized tests are counted
 once here and expand to more cases at run time, so the number pytest reports is
 higher.
 
-This catalogue covers what ships. A separate adversarial pack is withheld from
-publication and is neither counted nor named here; it does not run in CI, and no
-result in this repository depends on it.
-
 ## Summary
 
 | File | Tests |
@@ -196,7 +192,7 @@ The executor's refusal pipeline: registry check, directive scope, argument schem
 
 ## `tests/test_sensitive_resource_classification.py`
 
-The single sensitive-resource inventory and both layers that consume it. Covers that the policy guard and the file tool agree on every family and category, that the tool classifies the resolved path rather than the basename, and that normalisation is host-independent. Facts about this repository's own inventory; the traversal and evasion corpora stay restricted.
+The single sensitive-resource inventory and both layers that consume it. Covers that the policy guard and the file tool agree on every family and category, that the tool classifies the resolved path rather than the basename, and that normalisation is host-independent.
 
 34 tests.
 
@@ -494,7 +490,7 @@ Regression tests for the package-owned authority split: zero-policy refusal, wor
 
 ## `tests/test_audit_disclosure.py`
 
-Public contracts for the versioned audit envelope and the shared sanitizer used at audit, executor, transcript, router, model-context, and logging boundaries. Uses only an ordinary synthetic marker; scanner-evasion probes remain in the restricted suite.
+Public contracts for the versioned audit envelope and the shared sanitizer used at audit, executor, transcript, router, model-context, and logging boundaries. Uses only an ordinary synthetic marker.
 
 27 tests.
 
