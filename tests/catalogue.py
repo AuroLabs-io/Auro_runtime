@@ -70,6 +70,13 @@ FILE_PURPOSE = {
         "workspace resolution, protected-path writes, directive exposure sets, MCP "
         "startup enforcement, and the static verifier's source-checkout and encoding "
         "contracts. Every case proves a seam that is closed in shipped code.",
+    "test_egress.py":
+        "Outbound HTTP destination control at the connection layer. Which host "
+        "forms reach the resolver, which resolved addresses the deny-set refuses "
+        "and which it must permit, and what happens when a name answers with both. "
+        "Membership is asserted against explicit ranges rather than the "
+        "interpreter's category properties, so the verdict is the same on every "
+        "supported Python.",
     "test_verifier_non_vacuity.py":
         "The verifier is subject to the laws it enforces. Every evidence source "
         "verify_security() reads is driven to zero or to failure in turn, and the "

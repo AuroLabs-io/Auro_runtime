@@ -813,3 +813,83 @@ def test_the_guard_and_the_redactor_agree_on_a_nested_credential(make_guard_cont
         "unrelated argument content did not survive redaction, so the audit "
         "record loses the context an operator needs"
     )
+
+
+# --- Every position a value can occupy ----------------------------------------
+#
+# The scan runs against raw_args, which is the model's unvalidated output, so
+# every position in the structure is caller-controlled: dict values, list items,
+# and dict keys alike. These hold the traversal complete across all three.
+
+
+def test_secret_nested_in_a_list_of_dicts_is_detected(make_guard_context):
+    """The walk descends into list items, not only into dict values."""
+    args = {"headers": [{"Authorization": "sk-ant-" + "b" * 24}]}
+    guard = get_guard_registry()["check_no_secrets_in_args"]
+    verdict = guard(make_guard_context("http_request", args))
+    assert verdict is not None, "secret nested in a list of dicts must be detected"
+    assert verdict.code == "secret_detected"
+
+
+def test_secret_in_deeply_nested_list_is_detected(make_guard_context):
+    args = {"payload": [[{"key": "sk-ant-" + "c" * 24}]]}
+    guard = get_guard_registry()["check_no_secrets_in_args"]
+    assert guard(make_guard_context("http_request", args)) is not None
+
+
+def test_secret_placed_as_a_dict_key_is_detected(make_guard_context):
+    """A key is as caller-controlled as a value, so the walk covers both."""
+    guard = get_guard_registry()["check_no_secrets_in_args"]
+    secret = "sk-ant-" + "g" * 24
+    verdict = guard(make_guard_context("http_request", {secret: "innocuous"}))
+    assert verdict is not None, "a secret in the key position must be detected"
+    assert verdict.code == "secret_detected"
+
+
+def test_secret_key_is_detected_when_nested_and_inside_lists(make_guard_context):
+    guard = get_guard_registry()["check_no_secrets_in_args"]
+    secret = "sk-ant-" + "h" * 24
+    nested = guard(make_guard_context("http_request", {"outer": {"inner": {secret: "v"}}}))
+    assert nested is not None, "nested key-position secret must be detected"
+    in_list = guard(make_guard_context("http_request", {"headers": [{secret: "v"}]}))
+    assert in_list is not None, "key-position secret inside a list must be detected"
+
+
+# --- Channels that open before, or beside, the guard loop ---------------------
+
+
+def test_secret_does_not_leak_when_schema_validation_fails(
+    make_tool_call, registry, audit_events
+):
+    """Schema validation runs before the guards and its audit record carries the
+    raw args, so redaction has to happen there too."""
+    from auro_runtime.executor import UNRESTRICTED
+
+    secret = "sk-ant-" + "f" * 24
+    execute(make_tool_call("http_request", {"url": "", "body": secret}),
+            allowed_tools={"http_request"}, policy_rules=UNRESTRICTED, run_history=[])
+    failures = [e for e in audit_events if e["event"] == "argument_validation_failed"]
+    assert failures, "expected a validation-failure audit record"
+    assert secret not in repr(audit_events), (
+        "raw secret reached the validation-failure audit record"
+    )
+
+
+def test_validation_error_text_does_not_carry_the_offending_secret():
+    """Pydantic embeds the rejected input in its ValidationError message, so the
+    exception text is scrubbed as well as the parsed data."""
+    from auro_runtime.guards import scrub_secrets_from_text
+    from auro_runtime.schemas import ToolCallOutput
+
+    secret = "sk-ant-" + "j" * 24
+    try:
+        ToolCallOutput.model_validate({"tool": 1234, "args": {"body": secret}})
+        raise AssertionError("expected a validation error")
+    except Exception as exc:
+        raw = str(exc)
+        if secret not in raw:  # pragma: no cover - depends on pydantic rendering
+            return
+        assert secret not in scrub_secrets_from_text(raw), (
+            "scrubbing must remove the secret from the exception text"
+        )
+        assert "[REDACTED]" in scrub_secrets_from_text(raw)

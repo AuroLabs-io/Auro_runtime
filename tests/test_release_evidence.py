@@ -12,6 +12,7 @@ from release_evidence import (
     ReleaseEvidenceError,
     _private_pack_identity,
     _pytest_evidence,
+    _release_is_complete,
     _run_private_pack,
     export_commit,
     inspect_source_identity,
@@ -96,18 +97,59 @@ def test_distribution_evidence_requires_a_nonzero_passed_count():
         _pytest_evidence("7 skipped in 0.05s\n")
 
 
+# --- The published verdict is derived from the gates it summarises ------------
+
+
+def test_release_is_complete_only_when_every_mandatory_gate_passed():
+    passing = {"passed": True, "test_count": 7, "summary": "7 passed"}
+    other = {"passed": True, "test_count": 675, "summary": "675 passed"}
+
+    assert _release_is_complete(passing, other) is True
+
+
+def test_a_failed_gate_denies_release_completion():
+    passing = {"passed": True, "test_count": 7, "summary": "7 passed"}
+    failed = {"passed": False, "test_count": 0, "summary": "1 failed"}
+
+    assert _release_is_complete(passing, failed) is False
+    assert _release_is_complete(failed, passing) is False
+
+
+def test_a_gate_reporting_no_verdict_is_not_a_pass():
+    """A gate carrying no `passed` key has not decided the candidate is sound.
+
+    This is the fail-closed half: a gate added to the record but never given a
+    verdict must not be counted as one that cleared.
+    """
+    passing = {"passed": True, "test_count": 7, "summary": "7 passed"}
+    silent = {"status": "not_run", "reason": "nothing supplied"}
+
+    assert _release_is_complete(passing, silent) is False
+
+
+def test_release_completion_is_derived_rather_than_asserted():
+    """Negative control.
+
+    If the verdict were hardcoded, every case above would pass identically. This
+    fails unless the value actually tracks the gates it is given.
+    """
+    failed = {"passed": False, "summary": "1 failed"}
+
+    assert _release_is_complete(failed) is not _release_is_complete({"passed": True})
+
+
 # ---------------------------------------------------------------------------
-# The withheld-pack gate.
+# The additional-directory gate.
 #
-# The pack is withheld because its contents are transferable technique, and its
-# filenames and parametrized ids are that technique. These tests hold the line
-# that a verdict may travel and the corpus may not.
+# The evidence record travels with a published artifact, so it carries a verdict
+# and counts. These tests hold the line that no filename, node id or traceback
+# from the supplied directory reaches the record or the operator's terminal.
 # ---------------------------------------------------------------------------
 
-_SECRET_PAYLOAD = "%6c%6f%63%61%6c%68%6f%73%74"
+_SECRET_PAYLOAD = "unique-marker-that-must-not-reach-the-record"
 
 
-def _pack(tmp_path: Path, body: str, name: str = "test_named_after_its_contents.py") -> Path:
+def _pack(tmp_path: Path, body: str, name: str = "test_marker_in_the_filename.py") -> Path:
     pack = tmp_path / "pack"
     pack.mkdir(exist_ok=True)
     (pack / name).write_text(body, encoding="utf-8")
@@ -128,16 +170,16 @@ def test_private_pack_is_identified_by_digest_and_never_by_name(tmp_path):
     assert identity["file_count"] == 1
     assert len(identity["file_sha256"]) == 1
     assert len(identity["digest"]) == 64
-    # The filename describes the contents, so it must appear nowhere in a record
-    # that travels beside a published artifact.
-    assert "test_named_after_its_contents" not in json.dumps(identity)
+    # A filename can describe what it holds, so none may appear in a record that
+    # travels beside a published artifact.
+    assert "test_marker_in_the_filename" not in json.dumps(identity)
 
 
 def test_private_pack_digest_binds_to_content(tmp_path):
     pack = _pack(tmp_path, "def test_ok():\n    assert True\n")
     before = _private_pack_identity(pack)["digest"]
 
-    (pack / "test_named_after_its_contents.py").write_text(
+    (pack / "test_marker_in_the_filename.py").write_text(
         "def test_ok():\n    assert 1 == 1\n", encoding="utf-8"
     )
 
@@ -164,11 +206,11 @@ def test_private_pack_verdict_records_a_nonzero_count(tmp_path):
 
 
 def test_a_failing_private_pack_refuses_without_disclosing_the_case(tmp_path):
-    """The disclosure control, not just the refusal.
+    """The output control, not just the refusal.
 
-    A failing case prints its own parametrized id, and for the real pack those
-    ids are the payloads. This plants one, fails on it, and proves it reaches
-    neither the exception nor anything derived from it.
+    A failing case prints its own parametrized id. This plants a unique marker in
+    one, fails on it, and proves the marker reaches neither the exception nor
+    anything derived from it.
     """
     root = _source_root(tmp_path)
     pack = _pack(
@@ -187,7 +229,7 @@ def test_a_failing_private_pack_refuses_without_disclosing_the_case(tmp_path):
     assert "private pack did not pass" in message
     assert _SECRET_PAYLOAD not in message
     assert "test_refuses" not in message
-    assert "test_named_after_its_contents" not in message
+    assert "test_marker_in_the_filename" not in message
 
 
 def test_private_pack_that_runs_nothing_is_not_a_pass(tmp_path):

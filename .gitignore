@@ -31,8 +31,3 @@ Thumbs.db
 auro_secrets.yaml
 .auro_secrets.yaml
 auro_audit.jsonl
-
-# Local-only test material. Runs with the suite, never ships. Nothing in here is
-# tracked, so `git clean -fdx` deletes it and git will not bring it back --
-# keep a copy somewhere outside this repository.
-tests/local/

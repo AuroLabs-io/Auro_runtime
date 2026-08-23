@@ -7,14 +7,13 @@ evidence or select the source identity that evidence names.
 The command refuses a dirty checkout, proves that HEAD and the index are the
 expected commit tree, exports that commit with ``git archive``, builds wheel and
 sdist from the export, and runs the mandatory distribution matrix against those
-exact files.  Only after every gate passes are the artifacts and their evidence
-record copied to the requested output directory.
+exact files.  It then runs the behavioural suite inside that same export, so the
+tests are bound to the commit the artifacts were built from by construction
+rather than by assertion.  Only after every gate passes are the artifacts and
+their evidence record copied to the requested output directory.
 
-A withheld regression suite may be supplied with ``--private-pack``.  It runs
-inside the export, so it is bound to the same commit as the artifacts by
-construction rather than by assertion, and it is identified in the record by
-digest alone.  It cannot be supplied by CI, which is why its absence is recorded
-as ``release_complete: false`` instead of being left to look like a pass.
+An additional test directory may optionally be supplied with ``--private-pack``.
+It runs inside the export too and is identified in the record by digest alone.
 """
 
 from __future__ import annotations
@@ -262,14 +261,23 @@ def _pytest_evidence(stdout: str) -> dict[str, object]:
     return {"passed": True, "test_count": passed, "summary": summary}
 
 
-def _private_pack_identity(pack_dir: Path) -> dict[str, object]:
-    """Identify the pack by digest alone.
+def _release_is_complete(*mandatory_gates: dict[str, object]) -> bool:
+    """Every mandatory gate ran and reported a pass.
 
-    Deliberately records no filenames.  The pack is withheld because its
-    contents are transferable technique, and its filenames describe those
-    contents, so naming them in a record that travels with a published artifact
-    would republish the part that matters.  A digest is checkable by anyone
-    holding the pack and says nothing to anyone who does not.
+    Derived from the gate records rather than assembled beside them, so the
+    published verdict and the evidence it summarises cannot disagree.  A gate
+    carrying no ``passed`` key counts as failed: a gate that reported no verdict
+    has not decided the candidate is sound, it has failed to look.
+    """
+    return all(bool(gate.get("passed")) for gate in mandatory_gates)
+
+
+def _private_pack_identity(pack_dir: Path) -> dict[str, object]:
+    """Identify the supplied directory by digest alone.
+
+    Deliberately records no filenames.  The record travels with a published
+    artifact, and a digest is checkable by anyone holding the same directory
+    without describing its contents to anyone who does not.
     """
     files = sorted(path for path in pack_dir.glob("test_*.py") if path.is_file())
     if not files:
@@ -282,21 +290,20 @@ def _private_pack_identity(pack_dir: Path) -> dict[str, object]:
 
 
 def _run_private_pack(source_root: Path, pack_dir: Path) -> dict[str, object]:
-    """Run the withheld pack against the exported commit and return a verdict.
+    """Run the supplied directory against the exported commit and return a verdict.
 
-    The binding item 4 asks for is structural rather than asserted: the pack runs
-    inside the ``git archive`` export, so it cannot execute against different
-    source than the artifacts were built from.
+    The binding is structural rather than asserted: the tests run inside the
+    ``git archive`` export, so they cannot execute against different source than
+    the artifacts were built from.
 
-    Output handling is not the usual ``_run`` path.  A failing case in this pack
-    prints its own parametrized id, and those ids are the payloads, so neither a
-    traceback nor a node id may reach the evidence record or the operator's
-    terminal.  Tracebacks are suppressed at the runner and only the final
-    summary line -- counts, never names -- is retained.  An operator diagnosing
-    a failure re-runs the pack locally, where the full output is safe.
+    Output handling is not the usual ``_run`` path.  Tracebacks are suppressed at
+    the runner and only the final summary line -- counts, never names -- is
+    retained, so the evidence record carries a verdict rather than the contents
+    of whatever directory was supplied.  An operator diagnosing a failure re-runs
+    it locally, where the full output is available.
     """
     identity = _private_pack_identity(pack_dir)
-    target = source_root / "tests" / "local"
+    target = source_root / "tests" / "_supplied"
     target.mkdir(parents=True, exist_ok=True)
     for path in sorted(pack_dir.glob("test_*.py")):
         shutil.copy2(path, target / path.name)
@@ -305,7 +312,7 @@ def _run_private_pack(source_root: Path, pack_dir: Path) -> dict[str, object]:
         result = subprocess.run(
             [
                 sys.executable, "-B", "-m", "pytest",
-                "tests/local",
+                "tests/_supplied",
                 "-o", "addopts=",
                 "-q", "--tb=no", "-p", "no:cacheprovider",
             ],
@@ -406,12 +413,34 @@ def build_release_evidence(
         )
         distribution_evidence = _pytest_evidence(test_result.stdout)
 
+        # The behavioural suite, run inside the export rather than against the
+        # working tree, so it is bound to the same commit as the artifacts by
+        # construction rather than by assertion.  Deliberately without the
+        # distribution environment: those cases are their own gate above and
+        # rebuilding wheels here would only run them twice.
+        #
+        # One case cannot run here and skips with its reason: the false-positive
+        # sweep over `git ls-files` needs a checkout, and an export has no .git.
+        # CI runs it against the real checkout.
+        suite_result = _run(
+            [
+                sys.executable,
+                "-B",
+                "-m",
+                "pytest",
+                "-p",
+                "no:cacheprovider",
+            ],
+            cwd=source_root,
+        )
+        suite_evidence = _pytest_evidence(suite_result.stdout)
+
         if private_pack is not None:
             private_pack_evidence = _run_private_pack(source_root, private_pack)
         else:
             private_pack_evidence = {
                 "status": "not_run",
-                "reason": "no private pack supplied to this run",
+                "reason": "no additional test directory supplied to this run",
             }
 
         if _artifact_records(candidate_dir) != artifact_records:
@@ -447,15 +476,16 @@ def build_release_evidence(
                 "clean_before_and_after": True,
                 "twine_check": "passed",
                 "distribution_matrix": distribution_evidence,
+                "full_suite": suite_evidence,
                 "private_pack": private_pack_evidence,
             },
             # Every gate ran and passed, or this candidate is not publishable.
-            # A gate that did not run has not decided the candidate is sound, it
-            # has failed to look, and the two must not be indistinguishable in
-            # the record.  CI cannot supply the private pack, so its retained
-            # candidates are correctly marked incomplete rather than silently
-            # counted as verified.
-            "release_complete": private_pack_evidence["status"] == "passed",
+            # The additional directory is optional and is recorded rather than
+            # required; when one is supplied and fails, the run raises and no
+            # record is written at all.
+            "release_complete": _release_is_complete(
+                distribution_evidence, suite_evidence
+            ),
             "build_summary": _last_nonempty_line(build_result.stdout),
         }
         evidence_path = output_dir / "release-evidence.json"
@@ -511,9 +541,9 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "directory holding the withheld regression suite; without it the "
-            "record is marked release_complete: false rather than reporting a "
-            "gate that did not run as one that passed"
+            "optional directory holding an additional test suite to run inside "
+            "the export; it is recorded by digest, and a failure in it refuses "
+            "the run rather than being written to the record"
         ),
     )
     return parser

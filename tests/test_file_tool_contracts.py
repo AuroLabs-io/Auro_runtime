@@ -21,6 +21,7 @@ If one of these goes red, do not weaken the assertion and do not patch
 runtime_tools/file_tools.py from here.
 """
 
+import os
 from pathlib import Path
 from unittest import mock
 
@@ -821,3 +822,47 @@ class TestListDirRecursive:
         result = list_dir("output/__auro_recursive_block_probe__", recursive=True)
         names = {e["name"] for e in result["entries"]}
         assert "thing.pyc" not in names
+
+
+class TestRestoreFileArchiveNameContainment:
+    """`archive_name` is resolved and contained like every other path argument.
+
+    It names an entry inside `.auro_archive/`, so the resolved path must stay
+    under that directory. Both forms below resolve outside it and both are
+    refused; the source file is never read and the destination is never created.
+    """
+
+    def test_archive_name_outside_the_archive_directory_is_refused(
+        self, repo_root, tmp_path, temp_output_file, audit_events
+    ):
+        outside = tmp_path / "outside_absolute.txt"
+        outside.write_text("containment-probe-A", encoding="utf-8")
+        dest_rel = temp_output_file("output/__auro_contain_absolute__.txt")
+
+        result = restore_file(archive_name=str(outside), restore_to=dest_rel)
+
+        assert result["restored"] is False, (
+            "restore_file accepted an archive_name resolving outside the archive "
+            f"directory ({outside}). Source file was "
+            f"{'moved' if not outside.exists() else 'left in place'}."
+        )
+        assert outside.exists(), "a file outside the repo should never have been touched"
+        assert not (repo_root / dest_rel).exists()
+
+    def test_archive_name_traversing_out_of_the_archive_directory_is_refused(
+        self, repo_root, tmp_path, temp_output_file, audit_events
+    ):
+        outside = tmp_path / "outside_relative.txt"
+        outside.write_text("containment-probe-B", encoding="utf-8")
+        archive_dir = repo_root / file_tools._ARCHIVE_DIR_NAME
+        relative_name = os.path.relpath(str(outside), str(archive_dir))
+        dest_rel = temp_output_file("output/__auro_contain_relative__.txt")
+
+        result = restore_file(archive_name=relative_name, restore_to=dest_rel)
+
+        assert result["restored"] is False, (
+            f"restore_file followed a relative archive_name ({relative_name!r}) "
+            "out of the archive directory."
+        )
+        assert outside.exists(), "a file outside the repo should never have been touched"
+        assert not (repo_root / dest_rel).exists()

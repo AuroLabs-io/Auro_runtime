@@ -1,6 +1,6 @@
 # Test catalogue
 
-**442 test functions** across 17 files.
+**464 test functions** across 18 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -18,19 +18,20 @@ higher.
 | [`tests/test_classifier_pins.py`](../tests/test_classifier_pins.py) | 11 |
 | [`tests/test_enforcement.py`](../tests/test_enforcement.py) | 46 |
 | [`tests/test_sensitive_resource_classification.py`](../tests/test_sensitive_resource_classification.py) | 34 |
-| [`tests/test_file_tool_contracts.py`](../tests/test_file_tool_contracts.py) | 68 |
-| [`tests/test_credentials.py`](../tests/test_credentials.py) | 43 |
+| [`tests/test_file_tool_contracts.py`](../tests/test_file_tool_contracts.py) | 70 |
+| [`tests/test_credentials.py`](../tests/test_credentials.py) | 49 |
 | [`tests/test_registry.py`](../tests/test_registry.py) | 35 |
 | [`tests/test_directives.py`](../tests/test_directives.py) | 23 |
 | [`tests/test_end_to_end.py`](../tests/test_end_to_end.py) | 17 |
 | [`tests/test_security_p0.py`](../tests/test_security_p0.py) | 44 |
+| [`tests/test_egress.py`](../tests/test_egress.py) | 10 |
 | [`tests/test_verifier_non_vacuity.py`](../tests/test_verifier_non_vacuity.py) | 12 |
 | [`tests/test_mcp_auth.py`](../tests/test_mcp_auth.py) | 9 |
 | [`tests/test_audit_disclosure.py`](../tests/test_audit_disclosure.py) | 27 |
 | [`tests/test_archive_integrity.py`](../tests/test_archive_integrity.py) | 6 |
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 7 |
-| [`tests/test_release_evidence.py`](../tests/test_release_evidence.py) | 15 |
-| **Total** | **442** |
+| [`tests/test_release_evidence.py`](../tests/test_release_evidence.py) | 19 |
+| **Total** | **464** |
 
 ---
 
@@ -265,7 +266,7 @@ The single sensitive-resource inventory and both layers that consume it. Covers 
 
 The published contracts of the filesystem tools, one test per documented claim. Where write_file and delete_file may act, what read_file and list_dir refuse, the 1 MiB caps and the order the read cap is checked in, what restore_file requires of a destination, and the shape of a refusal. A documented limit with no test is a claim rather than a control, so each of these exists to make a revert of its subject fail.
 
-68 tests.
+70 tests.
 
 ### TestModuleConstantsMatchSpec
 
@@ -357,6 +358,10 @@ The published contracts of the filesystem tools, one test per documented claim. 
 - **non recursive excludes nested entries**
 - **recursive mode does not descend past one extra level**
 - **recursive still respects blocking for direct children**
+### TestRestoreFileArchiveNameContainment
+
+- **archive name outside the archive directory is refused**
+- **archive name traversing out of the archive directory is refused**
 
 ---
 
@@ -364,7 +369,7 @@ The published contracts of the filesystem tools, one test per documented claim. 
 
 Alias resolution and delivery. The property under test throughout is that a resolved secret never appears in a tool result, an error message, or the audit trail.
 
-43 tests.
+49 tests.
 
 ### TestKeyringBackendRoundTrip
 
@@ -411,6 +416,12 @@ Alias resolution and delivery. The property under test throughout is that a reso
 - **an unresolvable path redacts everything rather than skipping** — The class closure, and the half that outlives this particular bug.
 - **a resolvable path does not trigger the fallback** — Control: the over-redaction fires on failure only, not on every call.
 - **the guard and the redactor agree on a nested credential** — End to end: the path the guard emits is one the consumer can walk.
+- **secret nested in a list of dicts is detected** — The walk descends into list items, not only into dict values.
+- **secret in deeply nested list is detected**
+- **secret placed as a dict key is detected** — A key is as caller-controlled as a value, so the walk covers both.
+- **secret key is detected when nested and inside lists**
+- **secret does not leak when schema validation fails** — Schema validation runs before the guards and its audit record carries the
+- **validation error text does not carry the offending secret** — Pydantic embeds the rejected input in its ValidationError message, so the
 
 ---
 
@@ -591,6 +602,25 @@ Regression tests for the package-owned authority split: zero-policy refusal, wor
 
 ---
 
+## `tests/test_egress.py`
+
+Outbound HTTP destination control at the connection layer. Which host forms reach the resolver, which resolved addresses the deny-set refuses and which it must permit, and what happens when a name answers with both. Membership is asserted against explicit ranges rather than the interpreter's category properties, so the verdict is the same on every supported Python.
+
+10 tests.
+
+- **percent encoded hosts are refused**
+- **trailing dot and case variants are refused** — A trailing-dot FQDN is the same name to the resolver, not to a regex.
+- **numeric host forms are refused by the guard**
+- **address is denied**
+- **globally routable addresses are permitted** — Negative control. Every refusal case above would also pass if the
+- **special purpose ranges are denied without consulting properties** — These must be denied by explicit membership, not by a category property.
+- **ipv4 mapped addresses are collapsed explicitly** — The category properties must not be trusted to do this themselves.
+- **a name resolving to both public and private is refused** — Any denied address in the answer refuses the whole request.
+- **non http schemes are refused**
+- **a configured proxy refuses rather than validating the proxy** — With a proxy the destination never reaches the connection check.
+
+---
+
 ## `tests/test_verifier_non_vacuity.py`
 
 The verifier is subject to the laws it enforces. Every evidence source verify_security() reads is driven to zero or to failure in turn, and the aggregate verdict must not stay green — including the cases that raise no error finding, where a headline pass used to sit on top of a checks list that said the opposite. Passing paths assert numeric counts, not booleans.
@@ -707,18 +737,22 @@ Builds a real wheel and sdist, installs each into an isolated environment, and r
 
 Pins the publication gate to one explicit Git commit and tree. A dirty checkout, a different expected commit, or ambient source content must not produce release evidence for the reviewed tree.
 
-15 tests.
+19 tests.
 
 - **release identity binds head index and commit tree**
 - **release identity refuses a different expected commit**
 - **release identity refuses untracked or modified source**
 - **commit export excludes ambient working tree content**
 - **distribution evidence requires a nonzero passed count**
+- **release is complete only when every mandatory gate passed**
+- **a failed gate denies release completion**
+- **a gate reporting no verdict is not a pass** — A gate carrying no `passed` key has not decided the candidate is sound.
+- **release completion is derived rather than asserted** — Negative control.
 - **private pack is identified by digest and never by name**
 - **private pack digest binds to content**
 - **private pack refuses a directory with no test modules**
 - **private pack verdict records a nonzero count**
-- **a failing private pack refuses without disclosing the case** — The disclosure control, not just the refusal.
+- **a failing private pack refuses without disclosing the case** — The output control, not just the refusal.
 - **private pack that runs nothing is not a pass** — A pack that proved nothing must not be recorded as one that passed.
 - **the source ref reaches the record verbatim** — The ref is what makes the publication claim auditable, so it is recorded as given.
 - **an asserted publishable ref is recorded as a candidate** — The non-vacuity anchor for every case below.
