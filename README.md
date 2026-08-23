@@ -69,7 +69,7 @@ Only 2 of 12 tools carry authority beyond the local workspace, `http_request` an
 | `list_dir`, `read_file`                     | read filesystem; blocklist filters `.env`, `auro_secrets.yaml`, `.git`, `.pyc`; `read_file` 1 MiB cap                |
 | `write_file`, `delete_file`, `restore_file` | write/soft-delete filesystem, only under `output/` and `drafts/`; protected dirs blocked                             |
 | `resolve_secret`                            | reads secret store; never returns the value                                                                          |
-| `http_request`                              | network egress + reads secret (`auth_alias`); SSRF filter is string-only, not enforced                               |
+| `http_request`                              | network egress + reads secret (`auth_alias`); destination checked at connect time against the resolved address       |
 | `generate_text`                             | network egress + reads provider API key; per-run cap 10; high-cost gate is a soft speed-bump the model clears itself |
 ## Policies
 

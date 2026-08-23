@@ -43,6 +43,13 @@ FILE_PURPOSE = {
         "Covers that the policy guard and the file tool agree on every family and "
         "category, that the tool classifies the resolved path rather than the "
         "basename, and that normalisation is host-independent.",
+    "test_file_tool_contracts.py":
+        "The published contracts of the filesystem tools, one test per documented "
+        "claim. Where write_file and delete_file may act, what read_file and list_dir "
+        "refuse, the 1 MiB caps and the order the read cap is checked in, what "
+        "restore_file requires of a destination, and the shape of a refusal. A "
+        "documented limit with no test is a claim rather than a control, so each of "
+        "these exists to make a revert of its subject fail.",
     "test_credentials.py":
         "Alias resolution and delivery. The property under test throughout is that "
         "a resolved secret never appears in a tool result, an error message, or the "

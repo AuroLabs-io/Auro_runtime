@@ -1,6 +1,6 @@
 # Test catalogue
 
-**373 test functions** across 16 files.
+**442 test functions** across 17 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -16,8 +16,9 @@ higher.
 | [`tests/test_policy_validation.py`](../tests/test_policy_validation.py) | 30 |
 | [`tests/test_guard_bindings.py`](../tests/test_guard_bindings.py) | 15 |
 | [`tests/test_classifier_pins.py`](../tests/test_classifier_pins.py) | 11 |
-| [`tests/test_enforcement.py`](../tests/test_enforcement.py) | 45 |
+| [`tests/test_enforcement.py`](../tests/test_enforcement.py) | 46 |
 | [`tests/test_sensitive_resource_classification.py`](../tests/test_sensitive_resource_classification.py) | 34 |
+| [`tests/test_file_tool_contracts.py`](../tests/test_file_tool_contracts.py) | 68 |
 | [`tests/test_credentials.py`](../tests/test_credentials.py) | 43 |
 | [`tests/test_registry.py`](../tests/test_registry.py) | 35 |
 | [`tests/test_directives.py`](../tests/test_directives.py) | 23 |
@@ -29,7 +30,7 @@ higher.
 | [`tests/test_archive_integrity.py`](../tests/test_archive_integrity.py) | 6 |
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 7 |
 | [`tests/test_release_evidence.py`](../tests/test_release_evidence.py) | 15 |
-| **Total** | **373** |
+| **Total** | **442** |
 
 ---
 
@@ -142,7 +143,7 @@ Law 10's enforcement: every caller-supplied locator argument is inspected or exe
 
 The executor's refusal pipeline: registry check, directive scope, argument schema, then policy guards across block/warn/advisory and fail_closed/fail_open.
 
-45 tests.
+46 tests.
 
 - **unknown tool is refused**
 - **known tool with no restrictions succeeds**
@@ -176,6 +177,7 @@ The executor's refusal pipeline: registry check, directive scope, argument schem
 - **a secret in reason is labelled but not given to the targeted pass** — `reason` is not part of args, so it is not an addressable path.
 - **the secret scanner emits a walkable path for a nested list** — The scanner's path must be one the redactor can actually walk.
 - **secret guard audit redacts the value** — A secret must never reach the audit log in plaintext.
+- **redaction scrubs a secret shaped key** — The redaction pass covers key positions, not only values.
 - **real policies block sensitive path reads** — End of the chain: the actual shipped rules refuse a secrets-file read.
 - **real policies allow a benign call**
 - **an unknown argument is refused rather than dropped** — The whole point is that the tool must not run. A misspelled flag that is
@@ -256,6 +258,105 @@ The single sensitive-resource inventory and both layers that consume it. Covers 
 - **a path outside the base is refused with a reason** — Every caller contains before classifying, so being handed an uncontained
 - **a contained ordinary file is still permitted** — Control: fail-closed must not mean refuse-everything.
 - **the workspace ancestry is not judged** — Only the portion inside the workspace is the tool's subject. A workspace
+
+---
+
+## `tests/test_file_tool_contracts.py`
+
+The published contracts of the filesystem tools, one test per documented claim. Where write_file and delete_file may act, what read_file and list_dir refuse, the 1 MiB caps and the order the read cap is checked in, what restore_file requires of a destination, and the shape of a refusal. A documented limit with no test is a claim rather than a control, so each of these exists to make a revert of its subject fail.
+
+68 tests.
+
+### TestModuleConstantsMatchSpec
+
+- **writable dirs matches documented spec**
+- **delete allowlisted dirs matches documented spec**
+- **write and delete allowlists do not diverge** — A directory writable but not delete-allowlisted (or the reverse) is a
+- **directives is protected and not delete allowlisted**
+- **protected patterns matches documented spec**
+- **read blocklist matches documented spec**
+- **write max size is one megabyte**
+### TestPathTraversalContainment
+
+- **read file rejects dotdot traversal above root**
+- **list dir rejects dotdot traversal above root**
+- **write file rejects dotdot traversal above root**
+- **delete file rejects dotdot traversal above root**
+- **read file rejects deep multi segment traversal**
+- **read file rejects absolute path outside root**
+- **list dir rejects absolute path outside root**
+- **write file rejects absolute path outside root**
+- **delete file rejects absolute path outside root**
+- **traversal that resolves back inside root reads correctly**
+- **traversal through writable dir into source tree still reads**
+- **traversal into similarly prefixed sibling directory is rejected**
+- **write file traversal that lands in protected dir is still blocked**
+- **windows rooted path without drive letter is still contained**
+### TestSymlinkHandling
+
+- **read file through symlink escaping root is blocked**
+- **write file through symlink escaping root is blocked**
+### TestReadBlocklist
+
+- **read file blocks dotenv at root even when nonexistent**
+- **read file blocks dotenv case insensitively**
+- **read file blocks auro secrets yaml even when nonexistent**
+- **read file blocks dot auro secrets yaml**
+- **read file blocks dotenv nested in a writable directory**
+- **read file blocks pyc suffix**
+- **list dir filters git from root listing**
+- **list dir still lists non blocked dotfiles and known entries**
+- **list dir recursive still filters pyc suffix in nested entries**
+### TestReadBlocklistAppliesToEveryPathComponent
+
+- **nested git directory is hidden from list dir**
+- **file inside nested git directory is unreadable**
+- **non pyc file inside nested pycache directory is unreadable**
+### TestWriteControl
+
+- **write file succeeds in output dir**
+- **write file refused outside writable dirs**
+- **write file refused at the project root itself**
+- **write file overwrite archives previous version**
+- **write file rejects content over max size**
+- **read file rejects a file over max size** — read_file refuses a file over the 1 MiB cap.
+- **read file accepts a file at exact max size** — Boundary control. Without it, a cap that refused everything would pass
+- **read cap is checked before the file is loaded** — The cap must come from stat(), not from len() of an already-read string.
+- **write file accepts content at exact max size**
+- **write file size limit is measured in encoded bytes** — The 1 MiB write cap is measured in encoded bytes, not code points.
+### TestDeleteControl
+
+- **delete file soft deletes into archive**
+- **delete file refused for protected directories**
+- **delete file refused for protected filename even inside writable dir**
+- **delete file refused for directives writable but not delete allowlisted**
+- **delete file refused for directory with no allowlist membership at all**
+- **delete file on nested path within allowlisted dir succeeds**
+### TestRestoreFile
+
+- **restore file round trips using manifest lookup**
+- **restore file with explicit restore to**
+- **restore file nonexistent archive name gives clean error**
+- **restore file refuses when destination already exists**
+- **restore file restore to outside project root is rejected**
+### TestRestoreDestinationIsAllowlisted
+
+- **restore to must be in a writable directory**
+### TestNonexistentPathsAndCleanErrors
+
+- **read file on missing file**
+- **list dir on missing directory**
+- **delete file on missing file**
+- **restore file on missing archive entry**
+- **read file on a directory path gives clean error**
+- **list dir on a file path gives clean error**
+- **delete file on a directory path gives clean error**
+### TestListDirRecursive
+
+- **recursive includes nested entries**
+- **non recursive excludes nested entries**
+- **recursive mode does not descend past one extra level**
+- **recursive still respects blocking for direct children**
 
 ---
 

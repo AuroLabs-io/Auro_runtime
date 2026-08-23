@@ -11,7 +11,7 @@ Reference for embedding the runtime, driving the executor directly, and extendin
 - [Adding a tool](#adding-a-tool)
 - [Adding a guard](#adding-a-guard)
 - [Embedding and operating](#embedding-and-operating) — policy profile, secrets, audit, paths
-- [Tool reference](#tool-reference) — argument contracts for the 17 shipped tools
+- [Tool reference](#tool-reference) — argument contracts for the 12 shipped tools
 - [MCP server](#mcp-server)
 
 ---
@@ -106,7 +106,7 @@ proceed without it on purpose.
 ### Assembling the context
 
 ```python
-import runtime_tools  # registers the 17 shipped tools
+import runtime_tools  # registers the 12 shipped tools
 
 from auro_runtime.directive import allowed_tools_for, load_directive_by_id
 from auro_runtime.paths import get_directives_dir, get_policies_dir
@@ -269,7 +269,7 @@ class GuardVerdict:
 
 **Caveats**
 
-- Use `raw_args` for anything adversarial: `args` is the post-validation view, with defaults filled in and values coerced. `raw_args` is exactly what the model emitted. Both shipped secret guards scan `raw_args`, and it is the only view available for the four tools with no schema — there, `args` is the same object. Use `args` for the values the tool will actually receive.
+- Use `raw_args` for anything adversarial: `args` is the post-validation view, with defaults filled in and values coerced. `raw_args` is exactly what the model emitted. Both shipped secret guards scan `raw_args`. Every registered tool declares a schema and a test enforces that, so the two views differ for all of them; a tool registered without one would make `args` the same object. Use `args` for the values the tool will actually receive.
 - `frozen=True` prevents rebinding a field; it does not deep-freeze the contents. Treat the context as read-only: guards run in rule order, so a mutation is visible to every later guard and to the tool itself.
 - An unknown key never reaches a guard. `extra="forbid"` refuses it during validation, which is before the guard loop; that refusal is audited as `argument_validation_failed`, and no guard exists on that path to supply `matched_fields`, so name-and-pattern redaction is the only cover the rejected arguments get.
 - Returning `None` and returning `GuardVerdict(allowed=True, …)` both let the call proceed. A verdict writes a `policy_guard_check` record; `None` writes nothing at all.
@@ -475,7 +475,7 @@ A tool is reached by naming it in a directive's `tools:` list. What follows is t
 
 | Tool | Arguments | Limits |
 |---|---|---|
-| `http_request` | `url` str · `method` str = `GET` · `headers` dict \| None · `body` str \| None · `timeout` int = 30 (1–120) · `auth_alias` str \| None · `auth_scheme` str = `Bearer` | GET and POST only. Response body truncated at 10 000 characters, flagged by `truncated`. `auth_alias` is resolved at call time and injected; a raw token in `headers` is refused by the `no_hardcoded_secrets` guard. The destination filter is a **string test on the URL** and is not a security control |
+| `http_request` | `url` str · `method` str = `GET` · `headers` dict \| None · `body` str \| None · `timeout` int = 30 (1–120) · `auth_alias` str \| None · `auth_scheme` str = `Bearer` | GET and POST only. Response body truncated at 10 000 characters, flagged by `truncated`. `auth_alias` is resolved at call time and injected; a raw token in `headers` is refused by the `no_hardcoded_secrets` guard. The destination is checked at connection time against the **resolved IP address**, on the initial request and again on every redirect hop; loopback, private, link-local and any address that is not globally routable are refused. A request is refused outright when an HTTP proxy is configured, because the check cannot see the real destination through one |
 
 ### Model and credentials
 

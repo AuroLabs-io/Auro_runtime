@@ -490,6 +490,22 @@ def test_secret_guard_audit_redacts_the_value(make_tool_call, make_rule, registr
     assert secret not in serialized, "raw secret leaked into the audit trail"
 
 
+def test_redaction_scrubs_a_secret_shaped_key():
+    """The redaction pass covers key positions, not only values.
+
+    The README states that a resolved value never enters the audit log. Arguments
+    reach redaction as the model emitted them, so a key is as caller-controlled as
+    a value, and detecting a hit without redacting it is a half-fix: the guard
+    reports the secret while the record still carries it verbatim.
+    """
+    from auro_runtime.guards import redact_args_for_audit
+
+    secret = "sk-ant-" + "i" * 24
+    out = redact_args_for_audit({secret: "v", "nested": {secret: "v2"}})
+    assert secret not in repr(out), "secret survived redaction in the key position"
+    assert "[REDACTED_KEY]" in repr(out)
+
+
 # --- Real policy integration --------------------------------------------------
 
 
