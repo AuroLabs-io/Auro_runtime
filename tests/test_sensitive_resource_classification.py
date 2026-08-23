@@ -772,3 +772,32 @@ class TestUncontainedPathsFailClosed:
         inside.write_text("ordinary", encoding="utf-8")
 
         assert classify_resolved(inside, base.resolve()) is None
+
+
+class TestTheGuardRefusalText:
+    """`README.md` quotes the sensitive-path refusal, so its wording is a claim.
+
+    The guard's other coverage asserts that a refusal happened and which pattern
+    matched; nothing held the sentence a reader is shown. Rewording it would
+    make the README false with the suite green.
+    """
+
+    def test_the_refusal_names_the_argument_and_the_documented_reason(
+        self, make_guard_context
+    ):
+        from auro_runtime.guards import get_guard_registry
+
+        guard = get_guard_registry()["check_sensitive_paths"]
+        verdict = guard(make_guard_context("read_file", {"path": ".env"}))
+
+        assert verdict is not None, "precondition: a sensitive path must refuse"
+        assert verdict.allowed is False
+        assert "Path argument 'path' matches sensitive pattern." == verdict.message
+
+    def test_an_ordinary_path_produces_no_refusal_text(self, make_guard_context):
+        """Negative control: the message above is not emitted unconditionally."""
+        from auro_runtime.guards import get_guard_registry
+
+        guard = get_guard_registry()["check_sensitive_paths"]
+
+        assert guard(make_guard_context("read_file", {"path": "output/notes.txt"})) is None

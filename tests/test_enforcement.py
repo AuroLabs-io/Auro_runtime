@@ -341,6 +341,26 @@ def test_guard_exception_fail_closed_refuses(make_tool_call, make_rule, registry
     assert any(e["event"] == "policy_guard_error" for e in audit_events)
 
 
+def test_a_rule_naming_an_unregistered_guard_refuses_with_the_documented_text(
+    make_tool_call, make_rule, registry, audit_events
+):
+    """`docs/API.md` quotes this refusal: a rule whose guard is not in the
+    registry counts as a guard that failed, not one that approved.
+
+    The message text is the contract an integrator may match on, so it is
+    asserted rather than the branch alone.
+    """
+    rule = make_rule(guard="check_no_such_guard_is_registered", enforcement="block",
+                     on_error="fail_closed", rule_id="test_missing_guard")
+
+    result = execute(make_tool_call("echo", {"message": "hi"}),
+                     allowed_tools={"echo"}, policy_rules=[rule], run_history=[])
+
+    assert result.success is False
+    assert "Policy guard missing [test_missing_guard]" in result.error
+    assert "is not registered. Failing closed." in result.error
+
+
 def test_guard_exception_fail_open_proceeds(make_tool_call, make_rule, registry,
                                             exploding_guard, audit_events):
     rule = make_rule(guard=exploding_guard, enforcement="block", on_error="fail_open",

@@ -1,6 +1,6 @@
 # Test catalogue
 
-**464 test functions** across 18 files.
+**474 test functions** across 19 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -16,14 +16,15 @@ higher.
 | [`tests/test_policy_validation.py`](../tests/test_policy_validation.py) | 30 |
 | [`tests/test_guard_bindings.py`](../tests/test_guard_bindings.py) | 15 |
 | [`tests/test_classifier_pins.py`](../tests/test_classifier_pins.py) | 11 |
-| [`tests/test_enforcement.py`](../tests/test_enforcement.py) | 46 |
-| [`tests/test_sensitive_resource_classification.py`](../tests/test_sensitive_resource_classification.py) | 34 |
-| [`tests/test_file_tool_contracts.py`](../tests/test_file_tool_contracts.py) | 70 |
+| [`tests/test_enforcement.py`](../tests/test_enforcement.py) | 47 |
+| [`tests/test_sensitive_resource_classification.py`](../tests/test_sensitive_resource_classification.py) | 36 |
+| [`tests/test_file_tool_contracts.py`](../tests/test_file_tool_contracts.py) | 74 |
 | [`tests/test_credentials.py`](../tests/test_credentials.py) | 49 |
 | [`tests/test_registry.py`](../tests/test_registry.py) | 35 |
 | [`tests/test_directives.py`](../tests/test_directives.py) | 23 |
 | [`tests/test_end_to_end.py`](../tests/test_end_to_end.py) | 17 |
 | [`tests/test_security_p0.py`](../tests/test_security_p0.py) | 44 |
+| [`tests/test_documented_messages.py`](../tests/test_documented_messages.py) | 3 |
 | [`tests/test_egress.py`](../tests/test_egress.py) | 10 |
 | [`tests/test_verifier_non_vacuity.py`](../tests/test_verifier_non_vacuity.py) | 12 |
 | [`tests/test_mcp_auth.py`](../tests/test_mcp_auth.py) | 9 |
@@ -31,7 +32,7 @@ higher.
 | [`tests/test_archive_integrity.py`](../tests/test_archive_integrity.py) | 6 |
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 7 |
 | [`tests/test_release_evidence.py`](../tests/test_release_evidence.py) | 19 |
-| **Total** | **464** |
+| **Total** | **474** |
 
 ---
 
@@ -144,7 +145,7 @@ Law 10's enforcement: every caller-supplied locator argument is inspected or exe
 
 The executor's refusal pipeline: registry check, directive scope, argument schema, then policy guards across block/warn/advisory and fail_closed/fail_open.
 
-46 tests.
+47 tests.
 
 - **unknown tool is refused**
 - **known tool with no restrictions succeeds**
@@ -167,6 +168,7 @@ The executor's refusal pipeline: registry check, directive scope, argument schem
 - **unregistered guard may proceed only under fail open** — Negative control for the test above: the refusal follows on_error rather than
 - **directive is not re read during the step loop** — A run must not be able to widen its own authority.
 - **guard exception fail closed refuses**
+- **a rule naming an unregistered guard refuses with the documented text** — `docs/API.md` quotes this refusal: a rule whose guard is not in the
 - **guard exception fail open proceeds**
 - **guard exception fails closed for any unrecognised on error** — Only the exact string "fail_open" may fail open. Anything else, including a
 - **destructive guard fires for delete and restore not write**
@@ -199,7 +201,7 @@ The executor's refusal pipeline: registry check, directive scope, argument schem
 
 The single sensitive-resource inventory and both layers that consume it. Covers that the policy guard and the file tool agree on every family and category, that the tool classifies the resolved path rather than the basename, and that normalisation is host-independent.
 
-34 tests.
+36 tests.
 
 ### TestTheInventoryIsSharedNotCopied
 
@@ -259,6 +261,10 @@ The single sensitive-resource inventory and both layers that consume it. Covers 
 - **a path outside the base is refused with a reason** — Every caller contains before classifying, so being handed an uncontained
 - **a contained ordinary file is still permitted** — Control: fail-closed must not mean refuse-everything.
 - **the workspace ancestry is not judged** — Only the portion inside the workspace is the tool's subject. A workspace
+### TestTheGuardRefusalText
+
+- **the refusal names the argument and the documented reason**
+- **an ordinary path produces no refusal text** — Negative control: the message above is not emitted unconditionally.
 
 ---
 
@@ -266,7 +272,7 @@ The single sensitive-resource inventory and both layers that consume it. Covers 
 
 The published contracts of the filesystem tools, one test per documented claim. Where write_file and delete_file may act, what read_file and list_dir refuse, the 1 MiB caps and the order the read cap is checked in, what restore_file requires of a destination, and the shape of a refusal. A documented limit with no test is a claim rather than a control, so each of these exists to make a revert of its subject fail.
 
-70 tests.
+74 tests.
 
 ### TestModuleConstantsMatchSpec
 
@@ -358,6 +364,12 @@ The published contracts of the filesystem tools, one test per documented claim. 
 - **non recursive excludes nested entries**
 - **recursive mode does not descend past one extra level**
 - **recursive still respects blocking for direct children**
+### TestDocumentedRefusalText
+
+- **a write into a protected directory refuses and names it**
+- **a delete inside a protected directory refuses and names it** — The probe is created directly rather than aimed at a real policy file.
+- **widening the writable dirs onto a protected one is refused** — `AURO_RUNTIME_WRITABLE_DIRS` cannot be used to open a protected path.
+- **an ordinary widening still succeeds** — Negative control. Without this the refusal above would pass just as
 ### TestRestoreFileArchiveNameContainment
 
 - **archive name outside the archive directory is refused**
@@ -599,6 +611,18 @@ Regression tests for the package-owned authority split: zero-policy refusal, wor
 - **the destination check is actually installed** — The adapter must really replace the connection class.
 - **mounting the guard does not alter other pool managers** — urllib3 assigns pool_classes_by_scheme by reference without copying.
 - **no registered tool issues its own http request** — A tool must not carry a private destination check.
+
+---
+
+## `tests/test_documented_messages.py`
+
+Refusal messages quoted in README.md or docs/API.md are published claims, and this connects each one to a test that asserts it. The set is walked out of the source at check time rather than listed, so a message newly quoted in a shipped document fails the build until it is pinned. Its unit is the fragment a document cites, not the whole message text.
+
+3 tests.
+
+- **the extraction finds messages at all** — Negative control for every case below.
+- **a message quoted in shipped docs is pinned by a test** — A documented message with no test is a claim rather than a control.
+- **every exemption still describes something the source emits** — An exemption outlives its subject unless something checks.
 
 ---
 

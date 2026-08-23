@@ -70,6 +70,13 @@ FILE_PURPOSE = {
         "workspace resolution, protected-path writes, directive exposure sets, MCP "
         "startup enforcement, and the static verifier's source-checkout and encoding "
         "contracts. Every case proves a seam that is closed in shipped code.",
+    "test_documented_messages.py":
+        "Refusal messages quoted in README.md or docs/API.md are published "
+        "claims, and this connects each one to a test that asserts it. The set "
+        "is walked out of the source at check time rather than listed, so a "
+        "message newly quoted in a shipped document fails the build until it is "
+        "pinned. Its unit is the fragment a document cites, not the whole "
+        "message text.",
     "test_egress.py":
         "Outbound HTTP destination control at the connection layer. Which host "
         "forms reach the resolver, which resolved addresses the deny-set refuses "

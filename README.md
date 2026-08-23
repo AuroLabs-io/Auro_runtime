@@ -39,7 +39,7 @@ Running it when nothing has changed rewrites the same bytes, so there is no harm
 
 `write_file` accepts two destinations: `output` and `drafts`.
 
-A model drafting a directive writes to `drafts/directives/<id>.md` and stops there. Point the same call at any other directory and it comes back with `Path is in protected directory. Cannot write.` This block also covers `delete_file`, so existing directives cannot be removed either, and `policies/`, `auro_runtime/`, `runtime_tools/`, and `.git` all sit behind the same blacklist list. Each path is resolved to its real target before it is checked, so a symlink, a Windows junction, or a `../` sequence pointing outside the writable area resolves to its true location and is refused there.
+A model drafting a directive writes to `drafts/directives/<id>.md` and stops there. Point the same call at any other directory and it comes back with `Path is in protected directory 'directives'. Cannot write.` — the message names the directory it refused. This block also covers `delete_file`, which refuses the same way once the file exists, and `policies/`, `auro_runtime/`, `runtime_tools/`, and `.git` all sit behind the same blacklist list. Each path is resolved to its real target before it is checked, so a symlink, a Windows junction, or a `../` sequence pointing outside the writable area resolves to its true location and is refused there.
 
 A directive's `tools:` list is the only thing that grants tool authority to a run. If a directive should list a tool that is missing from the registry, any attempted call to it is refused. If a run could write to directives/, it could add a line to its own tool list, re-enter, and arrive holding permissions no operator ever gave it. The protected path stops that loop from closing.
 
