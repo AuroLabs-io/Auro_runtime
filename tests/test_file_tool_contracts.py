@@ -241,16 +241,28 @@ class TestPathTraversalContainment:
         assert not (repo_root / "auro_runtime" / "__auro_traversal_write_probe__.py").exists()
 
     def test_windows_rooted_path_without_drive_letter_is_still_contained(self):
-        # Path(r"\foo").is_absolute() is False on Windows (rooted but no drive letter),
-        # so file_tools takes the "relative" branch and joins it onto base -- but
-        # pathlib's own join semantics re-root a rooted-no-drive segment at the LHS's
-        # drive, landing outside base. Confirm the containment check still catches
-        # this (no false negative from the is_absolute() quirk).
+        # A rooted-no-drive path means two different things, so this asserts two.
+        #
+        # On Windows, Path(r"\foo").is_absolute() is False -- rooted, but carrying no
+        # drive -- so file_tools takes the "relative" branch and joins it onto base,
+        # and pathlib's own join semantics then re-root the segment at the LHS's
+        # drive, landing outside base. The containment check has to catch that, and
+        # the false negative it would otherwise be is the point of the test.
+        #
+        # On POSIX a backslash is an ordinary filename character, so the same string
+        # is a single legal component: it joins inside base and stays there. There is
+        # nothing to contain and the call fails on existence instead. Asserting that
+        # the containment message is *absent* is what keeps this meaningful here --
+        # it fails if POSIX ever starts re-rooting the segment.
         weird_path = r"\windows_rooted_no_drive_probe\evil.txt"
         assert Path(weird_path).is_absolute() is False  # documents the quirk being guarded against
         result = read_file(weird_path)
         assert result["content"] is None
-        assert "outside the allowed project directory" in result["error"]
+        if os.name == "nt":
+            assert "outside the allowed project directory" in result["error"]
+        else:
+            assert "does not exist" in result["error"]
+            assert "outside the allowed project directory" not in result["error"]
 
 
 class TestSymlinkHandling:
@@ -917,19 +929,29 @@ class TestRestoreFileArchiveNameContainment:
         assert not (repo_root / dest_rel).exists()
 
     def test_archive_name_traversing_out_of_the_archive_directory_is_refused(
-        self, repo_root, tmp_path, temp_output_file, audit_events
+        self, repo_root, temp_output_file, audit_events
     ):
-        outside = tmp_path / "outside_relative.txt"
-        outside.write_text("containment-probe-B", encoding="utf-8")
+        # The escape target sits beside the repo rather than under tmp_path. On the
+        # Windows runners the checkout and the temp directory are on different
+        # drives, and os.path.relpath raises ValueError across drives -- which
+        # crashed this test in its own setup, before restore_file was ever called.
+        # Both paths here are on the repo's drive, so the traversal is expressible
+        # on any host. Same idiom as the dotdot probes above, which also write
+        # beside the root and assert the file was never touched.
+        outside = repo_root.parent / "__auro_contain_relative_probe__.txt"
         archive_dir = repo_root / file_tools._ARCHIVE_DIR_NAME
-        relative_name = os.path.relpath(str(outside), str(archive_dir))
         dest_rel = temp_output_file("output/__auro_contain_relative__.txt")
+        outside.write_text("containment-probe-B", encoding="utf-8")
+        try:
+            relative_name = os.path.relpath(str(outside), str(archive_dir))
 
-        result = restore_file(archive_name=relative_name, restore_to=dest_rel)
+            result = restore_file(archive_name=relative_name, restore_to=dest_rel)
 
-        assert result["restored"] is False, (
-            f"restore_file followed a relative archive_name ({relative_name!r}) "
-            "out of the archive directory."
-        )
-        assert outside.exists(), "a file outside the repo should never have been touched"
-        assert not (repo_root / dest_rel).exists()
+            assert result["restored"] is False, (
+                f"restore_file followed a relative archive_name ({relative_name!r}) "
+                "out of the archive directory."
+            )
+            assert outside.exists(), "a file outside the repo should never have been touched"
+            assert not (repo_root / dest_rel).exists()
+        finally:
+            outside.unlink(missing_ok=True)
