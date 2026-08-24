@@ -25,7 +25,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install source and test dependencies
-        run: python -m pip install --upgrade pip ".[dev]"
+        run: python -m pip install --upgrade pip ".[anthropic,keyring,dev]"
       - name: Check generated test catalogue
         run: python -B -m tests.catalogue --check
       - name: Check generated directive catalogue

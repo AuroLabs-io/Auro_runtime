@@ -70,6 +70,16 @@ FILE_PURPOSE = {
         "workspace resolution, protected-path writes, directive exposure sets, MCP "
         "startup enforcement, and the static verifier's source-checkout and encoding "
         "contracts. Every case proves a seam that is closed in shipped code.",
+    "test_support_claims.py":
+        "The classifiers, extras and Requires-Python floor the package "
+        "publishes are claims an adopter acts on, and this holds them to the "
+        "CI matrix that would prove them. Both sides are derived at check "
+        "time -- the claim from installed metadata, the proof from ci.yml -- "
+        "and compared in both directions, so a claim wider than the matrix "
+        "and a matrix leg no classifier mentions each fail. It also refuses a "
+        "runner family it cannot map to a platform, and reports a stale "
+        "editable install rather than auditing a claim the source no longer "
+        "makes.",
     "test_documented_messages.py":
         "Refusal messages quoted in README.md or docs/API.md are published "
         "claims, and this connects each one to a test that asserts it. The set "

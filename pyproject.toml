@@ -16,7 +16,12 @@ keywords = ["agents", "mcp", "orchestration", "policy", "runtime"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "Operating System :: OS Independent",
+    # Narrowed from "OS Independent" 2026-08-23: that claim ranges over every
+    # platform that exists or will exist, so no matrix can prove it. These two
+    # are the runners CI actually uses, and test_support_claims.py fails if the
+    # two ever diverge in either direction.
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",

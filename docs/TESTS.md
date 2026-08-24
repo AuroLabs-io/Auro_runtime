@@ -1,6 +1,6 @@
 # Test catalogue
 
-**474 test functions** across 19 files.
+**484 test functions** across 20 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -24,6 +24,7 @@ higher.
 | [`tests/test_directives.py`](../tests/test_directives.py) | 23 |
 | [`tests/test_end_to_end.py`](../tests/test_end_to_end.py) | 17 |
 | [`tests/test_security_p0.py`](../tests/test_security_p0.py) | 44 |
+| [`tests/test_support_claims.py`](../tests/test_support_claims.py) | 10 |
 | [`tests/test_documented_messages.py`](../tests/test_documented_messages.py) | 3 |
 | [`tests/test_egress.py`](../tests/test_egress.py) | 10 |
 | [`tests/test_verifier_non_vacuity.py`](../tests/test_verifier_non_vacuity.py) | 12 |
@@ -32,7 +33,7 @@ higher.
 | [`tests/test_archive_integrity.py`](../tests/test_archive_integrity.py) | 6 |
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 7 |
 | [`tests/test_release_evidence.py`](../tests/test_release_evidence.py) | 19 |
-| **Total** | **474** |
+| **Total** | **484** |
 
 ---
 
@@ -611,6 +612,33 @@ Regression tests for the package-owned authority split: zero-policy refusal, wor
 - **the destination check is actually installed** — The adapter must really replace the connection class.
 - **mounting the guard does not alter other pool managers** — urllib3 assigns pool_classes_by_scheme by reference without copying.
 - **no registered tool issues its own http request** — A tool must not carry a private destination check.
+
+---
+
+## `tests/test_support_claims.py`
+
+The classifiers, extras and Requires-Python floor the package publishes are claims an adopter acts on, and this holds them to the CI matrix that would prove them. Both sides are derived at check time -- the claim from installed metadata, the proof from ci.yml -- and compared in both directions, so a claim wider than the matrix and a matrix leg no classifier mentions each fail. It also refuses a runner family it cannot map to a platform, and reports a stale editable install rather than auditing a claim the source no longer makes.
+
+10 tests.
+
+### TestTheProofSideIsRealBeforeAnythingIsComparedAgainstIt
+
+- **ci declares python versions to prove against**
+- **ci declares runners to prove against**
+### TestClaimedSupportIsExercised
+
+- **every claimed python version runs in ci**
+- **every claimed platform runs in ci**
+- **no claim ranges over a set no matrix can close**
+- **every declared extra is installed somewhere in ci**
+### TestExercisedSupportIsClaimed
+
+- **every python version ci runs is claimed**
+- **every platform ci runs is claimed**
+- **the requires python floor is the lowest version ci runs**
+### TestTheMetadataReadHereIsNotStale
+
+- **installed classifiers match the source of record**
 
 ---
 
