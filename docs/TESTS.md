@@ -1,6 +1,6 @@
 # Test catalogue
 
-**484 test functions** across 20 files.
+**487 test functions** across 20 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -16,9 +16,9 @@ higher.
 | [`tests/test_policy_validation.py`](../tests/test_policy_validation.py) | 30 |
 | [`tests/test_guard_bindings.py`](../tests/test_guard_bindings.py) | 15 |
 | [`tests/test_classifier_pins.py`](../tests/test_classifier_pins.py) | 11 |
-| [`tests/test_enforcement.py`](../tests/test_enforcement.py) | 47 |
+| [`tests/test_enforcement.py`](../tests/test_enforcement.py) | 49 |
 | [`tests/test_sensitive_resource_classification.py`](../tests/test_sensitive_resource_classification.py) | 36 |
-| [`tests/test_file_tool_contracts.py`](../tests/test_file_tool_contracts.py) | 74 |
+| [`tests/test_file_tool_contracts.py`](../tests/test_file_tool_contracts.py) | 75 |
 | [`tests/test_credentials.py`](../tests/test_credentials.py) | 49 |
 | [`tests/test_registry.py`](../tests/test_registry.py) | 35 |
 | [`tests/test_directives.py`](../tests/test_directives.py) | 23 |
@@ -33,7 +33,7 @@ higher.
 | [`tests/test_archive_integrity.py`](../tests/test_archive_integrity.py) | 6 |
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 7 |
 | [`tests/test_release_evidence.py`](../tests/test_release_evidence.py) | 19 |
-| **Total** | **484** |
+| **Total** | **487** |
 
 ---
 
@@ -146,7 +146,7 @@ Law 10's enforcement: every caller-supplied locator argument is inspected or exe
 
 The executor's refusal pipeline: registry check, directive scope, argument schema, then policy guards across block/warn/advisory and fail_closed/fail_open.
 
-47 tests.
+49 tests.
 
 - **unknown tool is refused**
 - **known tool with no restrictions succeeds**
@@ -188,6 +188,8 @@ The executor's refusal pipeline: registry check, directive scope, argument schem
 - **every registered tool schema forbids unknown arguments** — Stated over the registry rather than over a list of schemas, so a tool added
 - **a tool reporting an error is not reported as success** — End to end through a real refusal: write_file's own size cap.
 - **a successful tool call is still success** — Control. Without it, marking every call failed would satisfy the test above.
+- **a refused protected directory write is audited** — The finding this exists for: the privilege-escalation boundary refusing
+- **a successful tool call writes no refusal event** — Control for the test above, in the other direction. Emitting `tool_refused`
 - **a falsy error key is not a failure** — `error: None` on a success path must not be read as a refusal, or a tool
 - **a nested error key is not treated as a refusal** — Only a top-level `error` is the failure signal. A tool reporting errors as
 - **sensitive directories are blocked in bare and trailing slash forms** — The directory patterns required a trailing separator, and
@@ -273,7 +275,7 @@ The single sensitive-resource inventory and both layers that consume it. Covers 
 
 The published contracts of the filesystem tools, one test per documented claim. Where write_file and delete_file may act, what read_file and list_dir refuse, the 1 MiB caps and the order the read cap is checked in, what restore_file requires of a destination, and the shape of a refusal. A documented limit with no test is a claim rather than a control, so each of these exists to make a revert of its subject fail.
 
-74 tests.
+75 tests.
 
 ### TestModuleConstantsMatchSpec
 
@@ -368,6 +370,7 @@ The published contracts of the filesystem tools, one test per documented claim. 
 ### TestDocumentedRefusalText
 
 - **a write into a protected directory refuses and names it**
+- **a write outside the writable dirs refuses with the documented text** — The other refusal the README quotes, for a directory that is merely
 - **a delete inside a protected directory refuses and names it** — The probe is created directly rather than aimed at a real policy file.
 - **widening the writable dirs onto a protected one is refused** — `AURO_RUNTIME_WRITABLE_DIRS` cannot be used to open a protected path.
 - **an ordinary widening still succeeds** — Negative control. Without this the refusal above would pass just as

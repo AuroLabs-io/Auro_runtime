@@ -852,6 +852,26 @@ class TestDocumentedRefusalText:
         assert "Path is in protected directory 'directives'. Cannot write." in result["error"]
         assert not (repo_root / "directives" / "__auro_protected_write_probe__.md").exists()
 
+    def test_a_write_outside_the_writable_dirs_refuses_with_the_documented_text(
+        self, repo_root
+    ):
+        """The other refusal the README quotes, for a directory that is merely
+        not writable rather than protected.
+
+        `docs/` is the probe because it is neither in `_PROTECTED_PATTERNS` nor
+        in `_WRITABLE_DIRS`, which is the branch this message belongs to — aiming
+        at a protected directory would take the sentence above instead and prove
+        nothing about this one.
+        """
+        result = write_file("docs/__auro_unwritable_dir_probe__.txt", "x")
+
+        assert result["written"] is False
+        assert (
+            "Writes only allowed in designated directories (drafts, output). "
+            "File is in 'docs'." in result["error"]
+        )
+        assert not (repo_root / "docs" / "__auro_unwritable_dir_probe__.txt").exists()
+
     def test_a_delete_inside_a_protected_directory_refuses_and_names_it(self, repo_root):
         """The probe is created directly rather than aimed at a real policy file.
 

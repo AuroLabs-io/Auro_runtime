@@ -1,6 +1,6 @@
 # Audit event catalogue
 
-**27 event names** are emitted by the runtime.
+**28 event names** are emitted by the runtime.
 
 Generated from the `write_audit_event` call sites by
 `python -m tests.audit_catalogue`. Do not edit by hand.
@@ -41,6 +41,7 @@ a guard that approves returns `None` and writes nothing.
 | `router_backend_error` | `auro_runtime/orchestrator.py` | `error` |
 | `tool_execution_error` | `auro_runtime/executor.py` | `args`, `directive_id`, `error`, `reason`, `tool` |
 | `tool_not_allowed` | `auro_runtime/executor.py` | `allowed_tools`, `directive_id`, `error`, `reason`, `tool` |
+| `tool_refused` | `auro_runtime/executor.py` | `args`, `directive_id`, `error`, `reason`, `tool` |
 | `tool_type_error` | `auro_runtime/executor.py` | `args`, `directive_id`, `error`, `reason`, `tool` |
 | `unguarded_mode_enabled` | `auro_runtime/orchestrator.py` | `directive_id`, `policies_dir`, `policy_profile` |
 | `unknown_tool` | `auro_runtime/executor.py` | `directive_id`, `error`, `reason`, `registered`, `tool` |
@@ -58,6 +59,7 @@ Refusals and failures from the tool-call pipeline.
 - `policy_guard_missing`
 - `tool_execution_error`
 - `tool_not_allowed`
+- `tool_refused`
 - `tool_type_error`
 - `unknown_tool`
 
@@ -87,6 +89,14 @@ Model-loop and directive-resolution failures.
 - `policy_validation_failed`
 - `router_backend_error`
 - `unguarded_mode_enabled`
+
+---
+
+## `auro_runtime/resource_plan.py`
+
+Resolved-path classification, before the tool acts.
+
+- `resource_classification`
 
 ---
 

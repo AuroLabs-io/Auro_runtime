@@ -635,6 +635,63 @@ def test_a_successful_tool_call_is_still_success(make_tool_call, registry):
     assert result.error is None
 
 
+# --- A tool that refuses leaves a line in the audit log -----------------------
+#
+# `success=False` reaches the run transcript, but the audit log is the record an
+# operator reads after an incident, and tool-internal refusals wrote nothing to
+# it: the executor's error branch returned without emitting. The refusals that
+# went unrecorded include the protected-directory boundary -- the control that
+# stops a run editing its own `tools:` list and re-entering with authority
+# nobody granted. It refused silently, so the log an operator consults looked
+# identical to one where no attempt was ever made.
+#
+# README.md claimed the runtime "records all call refusals" while docs/API.md
+# said that path writes no audit event. Both cannot be true; the code now
+# matches the README.
+
+
+def test_a_refused_protected_directory_write_is_audited(
+    make_tool_call, registry, audit_events
+):
+    """
+    The finding this exists for: the privilege-escalation boundary refusing
+    without a trace. Driven through a real refusal rather than a stub, because
+    the defect was in which branch of the executor emits, not in the tool.
+    """
+    result = execute(
+        make_tool_call("write_file", {"path": "directives/evil.md", "content": "x"}),
+        allowed_tools={"write_file"}, policy_rules=UNRESTRICTED, run_history=[],
+    )
+
+    assert result.success is False
+    assert "protected directory" in result.error
+
+    refusals = [e for e in audit_events if e["event"] == "tool_refused"]
+    assert refusals, (
+        "the protected-directory refusal left no audit line; an operator "
+        "reading auro_audit.jsonl would conclude no attempt was made"
+    )
+    # Non-vacuity: an event carrying neither the tool nor the reason would
+    # satisfy a bare presence check while telling a reader nothing.
+    assert refusals[0]["tool"] == "write_file"
+    assert "protected directory" in refusals[0]["error"]
+
+
+def test_a_successful_tool_call_writes_no_refusal_event(
+    make_tool_call, registry, audit_events
+):
+    """
+    Control for the test above, in the other direction. Emitting `tool_refused`
+    unconditionally would satisfy it, and would make the log useless by making
+    every call look refused.
+    """
+    result = execute(make_tool_call("echo", {"message": "hello"}),
+                     allowed_tools={"echo"}, policy_rules=UNRESTRICTED, run_history=[])
+
+    assert result.success is True
+    assert not [e for e in audit_events if e["event"] == "tool_refused"]
+
+
 @pytest.mark.parametrize("payload", [None, ""])
 def test_a_falsy_error_key_is_not_a_failure(make_tool_call, payload):
     """

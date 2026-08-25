@@ -39,7 +39,7 @@ Running it when nothing has changed rewrites the same bytes, so there is no harm
 
 `write_file` accepts two destinations: `output` and `drafts`.
 
-A model drafting a directive writes to `drafts/directives/<id>.md` and stops there. Point the same call at any other directory and it comes back with `Path is in protected directory 'directives'. Cannot write.` — the message names the directory it refused. This block also covers `delete_file`, which refuses the same way once the file exists, and `policies/`, `auro_runtime/`, `runtime_tools/`, and `.git` all sit behind the same blacklist list. Each path is resolved to its real target before it is checked, so a symlink, a Windows junction, or a `../` sequence pointing outside the writable area resolves to its true location and is refused there.
+A model drafting a directive writes to `drafts/directives/<id>.md` and stops there. Point the same call at a protected directory and it comes back with `Path is in protected directory 'directives'. Cannot write.` — the message names the directory it refused. Any other directory outside `output/` and `drafts/` is refused too, with `Writes only allowed in designated directories (drafts, output). File is in '<name>'.` This block also covers `delete_file`, which refuses the same way once the file exists, and `policies/`, `auro_runtime/`, `runtime_tools/`, and `.git` all sit behind the same blacklist list. Each path is resolved to its real target before it is checked, so a symlink, a Windows junction, or a `../` sequence pointing outside the writable area resolves to its true location and is refused there.
 
 A directive's `tools:` list is the only thing that grants tool authority to a run. If a directive should list a tool that is missing from the registry, any attempted call to it is refused. If a run could write to directives/, it could add a line to its own tool list, re-enter, and arrive holding permissions no operator ever gave it. The protected path stops that loop from closing.
 
@@ -570,7 +570,7 @@ Example output:
 }
 ```
 
-If either of the first two phases report an `error` severity finding, the dynamic phase does not run. `Warn` severity results or a check that crashes is recorded as failed in `checks` but contributes no finding does not stop the dynamic phase. In its place in `phases` it will be marked `skipped` with the reason instead of as a pass.
+If either of the first two phases fails, the dynamic phase does not run. A phase fails when it reports an `error` severity finding **or** when any subcheck in `checks` reports a failure. `Warn` severity findings alone do not fail a phase and do not stop the dynamic phase. In its place in `phases` it will be marked `skipped` with the reason instead of as a pass.
 
 **Phases:**
 - Static checks parse every source file and validate directive front matter. 
@@ -649,9 +649,11 @@ Anything beyond the step and call caps (a model-call timeout, retry, cancellatio
 
 ## Requirements
 
-Python 3.10+. Core dependencies are `pyyaml>=6.0`, `pydantic>=2.0`, `mcp>=1.26,<2`, and `requests>=2.28`. Model provider SDKs are optional extras, imported only when that backend is selected, so the package installs and runs with none of them present.
+Python 3.10+. Core dependencies are `pyyaml>=6.0`, `pydantic>=2.0`, `mcp>=1.26,<2`, `requests>=2.28`, and `urllib3>=2,<3`. Model provider SDKs are optional extras, imported only when that backend is selected, so the package installs and runs with none of them present.
 
 Both `mcp` bounds are load-bearing. mcp 2.0.0 removed `mcp.server.fastmcp`, which `mcp_server.py` imports, so an unbounded `mcp>=1.0` resolves to a version where the MCP server dies on import (the isolated-wheel install test is what catches it). The floor is the version this has actually been exercised against rather than the oldest that might work: the server passes `token_verifier=` to FastMCP, which early 1.x does not accept.
+
+The `urllib3` bound is load-bearing for the same reason. The egress destination control subclasses urllib3's connection and pool classes and replaces `pool_classes_by_scheme` on the pool manager; `requests` itself permits `urllib3>=1.21.1,<3`, so without this floor a resolver can produce an install where the adapter mounts cleanly and guards nothing — a security control that is absent while looking present.
 
 ## License
 

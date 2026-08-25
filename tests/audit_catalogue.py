@@ -16,8 +16,11 @@ Two deliberate properties, matching tests/directive_catalogue.py:
 * **Read from the emitting source, not from a hand-kept list.** The names here
   are the string literals the runtime actually passes to `write_audit_event`.
   A separate list maintained by hand is exactly the thing that drifted.
-* **Refuses rather than guesses.** An event name that is not a literal string
-  cannot be catalogued, and halts generation. An audit event nobody can name is
+* **Refuses rather than guesses.** An event name that is not a literal string,
+  or that is not passed positionally at all, cannot be catalogued and halts
+  generation. So does a module that emits events and has no MODULE_BLURB entry,
+  because the alternative is publishing a document that is missing a whole
+  section and says nothing about the omission. An audit event nobody can name is
   an audit event nobody can alert on.
 
 Field lists are best-effort by design and say so in the output: a call that
@@ -59,11 +62,17 @@ ENVELOPE_FIELDS = frozenset(
     }
 )
 
+# The one part of this generator kept by hand rather than read from source, and
+# so the one part that can fall behind it. render() refuses to publish a module
+# that is missing from here rather than dropping its section, which makes that
+# drift loud instead of invisible. The reverse is harmless and stays: policy.py
+# emits nothing today, and an unused line costs less than rediscovering it.
 MODULE_BLURB = {
     "auro_runtime/executor.py": "Refusals and failures from the tool-call pipeline.",
     "auro_runtime/orchestrator.py": "Model-loop and directive-resolution failures.",
     "auro_runtime/mcp_server.py": "Server-side exposure refusals.",
     "auro_runtime/policy.py": "Policy-loading outcomes.",
+    "auro_runtime/resource_plan.py": "Resolved-path classification, before the tool acts.",
     "runtime_tools/file_tools.py": "Changes the runtime made to files on disk.",
 }
 
@@ -73,8 +82,25 @@ class UncatalogableEvent(SystemExit):
         listed = "\n".join(f"  - {p}" for p in problems)
         super().__init__(
             f"{len(problems)} audit event(s) cannot be catalogued:\n{listed}\n\n"
-            f"An event name must be a literal string. A name assembled at runtime "
-            f"cannot be documented, grouped on, or alerted on. Use a literal."
+            f"An event name must be a literal string, passed as the first positional "
+            f"argument. A name assembled at runtime, or reachable only through a "
+            f"keyword or a ** splat, cannot be documented, grouped on, or alerted on. "
+            f"Pass a literal, positionally."
+        )
+
+
+class UndescribedModule(SystemExit):
+    """A module emits events and MODULE_BLURB has nothing to say about it."""
+
+    def __init__(self, modules: list[str]) -> None:
+        listed = "\n".join(f"  - {m}" for m in modules)
+        super().__init__(
+            f"{len(modules)} module(s) emit audit events with no MODULE_BLURB entry:\n"
+            f"{listed}\n\n"
+            f"Add one line per module to MODULE_BLURB in tests/audit_catalogue.py "
+            f"saying what its events are about. Without an entry the module's whole "
+            f"section is absent from the catalogue while its events still appear in "
+            f"the table above, so the document reads as complete and is not."
         )
 
 
@@ -146,7 +172,17 @@ def collect() -> list:
                 continue
             func = node.func
             name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
-            if name != EMITTER or not node.args:
+            if name != EMITTER:
+                continue
+            # No positional at all: the name is in `event=` or inside a ** splat.
+            # That is an emitter call this generator cannot read, not a call that
+            # isn't one, and the two must not share an exit. Skipping it would
+            # drop the event from the catalogue with nothing said about it, which
+            # is the exact failure this generator exists to prevent.
+            if not node.args:
+                problems.append(
+                    f"{rel}:{node.lineno}: event name is not a positional argument"
+                )
                 continue
             first = node.args[0]
             if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
@@ -210,15 +246,21 @@ def render(found: list) -> str:
         out.append(f"| `{event}` | {where} | {shown} |")
     out.append("")
 
+    # by_module is keyed on the module a section is written under, so these are
+    # exactly the modules whose sections would go missing. A module that emits
+    # only events first seen elsewhere heads no section and so needs no blurb.
+    # A blank entry counts as missing: it would render an empty paragraph under
+    # a heading, which describes the module no better than omitting it did.
+    undescribed = [m for m in sorted(by_module) if not MODULE_BLURB.get(m, "").strip()]
+    if undescribed:
+        raise UndescribedModule(undescribed)
+
     for module in sorted(by_module):
-        blurb = MODULE_BLURB.get(module)
-        if not blurb:
-            continue
         out.append("---")
         out.append("")
         out.append(f"## `{module}`")
         out.append("")
-        out.append(blurb)
+        out.append(MODULE_BLURB[module])
         out.append("")
         for event, _modules, _fields, _complete in sorted(by_module[module]):
             out.append(f"- `{event}`")

@@ -396,6 +396,45 @@ def execute(
             # `result`. The payload is kept rather than blanked: it carries the
             # tool's own detail (`written: False`, and so on), and unlike the
             # executor's own refusals above there is a body worth reading.
+            #
+            # Audited here rather than at each refusal site. Every tool-internal
+            # refusal reaches this one branch, so this is the whole class: the
+            # protected-directory write and delete refusals, a blocked egress
+            # destination, the read and write size caps, an unsupported scheme,
+            # an unconfigured credential alias. Auditing them one site at a time
+            # would leave the next one to be written silent by default.
+            #
+            # The protected-directory boundary is the reason this matters. It is
+            # the control that stops a run editing its own `tools:` list and
+            # re-entering with authority nobody granted, and until this event it
+            # refused without leaving a line -- so an operator reading
+            # auro_audit.jsonl after an incident saw nothing and concluded no
+            # attempt had been made.
+            #
+            # A refusal that already passed check_resource_plan is recorded
+            # twice, by design: resource_classification carries the
+            # classification verdict, and this carries the refusal of the call.
+            # They are different facts and the second does not imply the first.
+            logger.warning(
+                "tool_refused: tool=%s error=%s",
+                safe_tool,
+                tool_error,
+                extra={
+                    "tool": safe_tool,
+                    "tool_args": _redacted_args(tool_call.args),
+                    "error": tool_error,
+                },
+            )
+            write_audit_event(
+                "tool_refused",
+                **sanitize_fields_with_report(
+                    tool=tool_call.tool,
+                    directive_id=directive_id,
+                    error=tool_error,
+                    reason=tool_call.reason or None,
+                    args=tool_call.args,
+                ),
+            )
             return ToolCallResult(
                 success=False,
                 result=safe_result,
