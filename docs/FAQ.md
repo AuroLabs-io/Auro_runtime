@@ -16,6 +16,14 @@ No. Tool results are scrubbed for secret-shaped strings before they re-enter the
 
 No. Every path is resolved to its real target before the containment check, so a symlink, a Windows junction, or a `../` sequence that points outside the workspace resolves to its true location and is then rejected. The one deliberate exception is reads of `directives/` and `policies/`: those are read-only virtual mounts onto the packaged, reviewed authority files, which live outside the writable workspace by design. Writes, deletes, and restores are always workspace-only.
 
+### Does the runtime stop SSRF — a tool being pointed at internal network addresses?
+
+Yes, for address-based cases. Every outbound connection is checked as it is opened, against the address it is about to dial rather than against the URL string, so a destination that resolves to a loopback, private, link-local, reserved, multicast or other special-purpose address is refused. Redirects are covered without special handling, because each one opens a new connection and every connection is checked.
+
+Two behaviours to expect. A name that resolves to **any** denied address is refused outright rather than connecting to a permitted sibling — a public hostname that also answers with a private address will not connect, because answering with both is the rebinding shape and quietly choosing the safe address would leave you believing the name is safe. And the address that was checked is the address that is dialed, with no second lookup in between.
+
+What this does not do is constrain **which** public hosts a tool may reach. There is no destination allowlist: any globally routable address is permitted. If a directive grants `http_request`, restricting its reachable surface is your responsibility.
+
 ### How do policy guards compose when more than one covers a call?
 
 Deterministically. Rules load in a fixed order — alphabetical by policy filename, then in the order written within each file. Evaluation is first-block-wins with short-circuit: a `warn` verdict is recorded and evaluation continues, but a `block` (or a guard that raises under `fail_closed`) refuses the call immediately and skips the remaining rules, so only the first blocking verdict is recorded. A `warn`, or a guard error under `fail_open`, does not stop later rules from running.

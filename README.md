@@ -259,13 +259,14 @@ The first command prompts for the value so it does not need to appear in shell h
 The kernel's one job is to make a model's proposed actions refusable before they run. Everything else in the trust boundary follows from that one stance.
 
 | Party                                 | Trusted?                            | Grounding                                                                                                                                                                                                                        |
-| ------------------------------------- | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ------------------------------------- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | The model                             | **No** — primary adversary          | Its calls are the thing checked; sees only rule id/description in the prompt (`policy.py:308-316`); cannot set config (no model `os.environ` write); cannot reach a tool no directive grants (`allowed_tools_for` fails closed). |
 | Tool output                           | **Partly**                          | Scrubbed for secret shapes before re-entering context (`sanitize_value`), but embedded instructions are not neutralized. Treat tool results as untrusted data.                                                                   |
 | Directive / policy author             | **Yes** (trusted human, R2)         | A directive's `tools:` list is its authority; `write_file` refuses paths under `directives/`; activation is a deliberate human file move.                                                                                        |
 | Embedding application via `execute()` | **Yes** (R3)                        | Must supply a complete security context; `UNRESTRICTED` is the only explicit opt-out. Publishing `docs/API.md` is what makes this tier reachable at all.                                                                         |
 | Operator / deployment                 | **Yes**                             | Sets configuration, including knobs that deliberately weaken the default posture. The runtime does not defend against its own operator.                                                                                          |
 | MCP client                            | **Authenticated, not individuated** | `AURO_MCP_API_KEY` gates streamable-http; the exposed directive set is server-wide and does not have a per-client deployment configuration; no per-caller RBAC.                                                                  |
+| Network destination                   | **No**                              | Every network-capable tool routes through `guarded_request()`. The destination is checked at connect time against the *resolved address*, inside urllib3's `_new_conn()`.                                                        |
 
 **Settings that weaken the default posture.** All are operator-set; none is reachable by a model. `AURO_ALLOW_NO_POLICIES` is the environment form of the deliberate opt-out detailed under Opting out below; the rest are single switches.
 
@@ -309,6 +310,17 @@ No enforceable policy rules were loaded from '<dir>'. Every policy guard would b
 ```
 
 Setting `AURO_ALLOW_NO_POLICIES=1` takes that refusal off, and the run proceeds with `UNRESTRICTED` in place of its rules. It emits `unguarded_mode_enabled`, so the log records that the choice was made.
+### Network egress
+
+`http_request` and `generate_text` both reach the network. Every outbound connection is checked at the point it is opened, against the address it is about to dial.
+
+A request is refused when the destination resolves to a loopback, link-local, private, reserved, multicast or unspecified address, to anything not globally routable, or to one of a list of special-purpose ranges — carrier-grade NAT, IETF protocol assignments, 6to4 relay anycast, benchmarking, reserved-for-future-use, IPv4-compatible and NAT64 prefixes, Teredo, 6to4 and 6bone. The ranges are listed explicitly because the standard-library category properties have differed between CPython versions.
+
+Two behaviours to know before deploying:
+
+**A name that resolves to any denied address is refused outright**. A public hostname that also answers with a private address will not connect. 
+
+**The address that was checked is the address that is dialed.** Resolution happens once, in the guard, and the connection opens against a literal address. There is no second lookup. The check runs below the URL parser and below redirect handling, so redirects need no special handling: a redirect opens a new connection, and every connection is checked.
 
 ## Install
 
