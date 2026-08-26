@@ -31,11 +31,25 @@ from auro_runtime.sensitive_paths import classify_text
 
 _PROJECT_ROOT = None
 
-# "tests" matters: verify_code_dynamic runs pytest inside the temporary copy.
-# "docs" matters because the copied suite validates its generated catalogue.
-# Without either directory, the dynamic phase cannot verify the real project.
-_SOURCE_DIRS = ["auro_runtime", "runtime_tools", "directives", "policies", "tests", "docs"]
-_SCAN_DIRS = [*_SOURCE_DIRS, ".github"]
+# What the sandbox copies. Everything the copied suite READS has to be here,
+# not merely everything it imports, and that has now been learned three times:
+# "tests" because verify_code_dynamic runs pytest inside the temporary copy,
+# "docs" because the copied suite validates its generated catalogue, and
+# ".github" because test_support_claims reads the CI workflow to check the
+# support matrix. Each was added after the copied suite failed without it.
+#
+# The failure is quiet in the direction that matters: the suite passes in CI,
+# which runs against the real checkout, and fails only under
+# verify_code_dynamic, which nothing in CI calls. A test that reads a path
+# this list does not carry is invisible until someone runs the verifier by
+# hand. Nothing keeps the two in sync -- see the open thread on the class.
+_SOURCE_DIRS = ["auro_runtime", "runtime_tools", "directives", "policies", "tests", "docs", ".github"]
+
+# Currently identical to _SOURCE_DIRS, and kept separate because they answer
+# different questions: what a faithful copy needs, versus what a whole-tree
+# scan walks. ".github" was appended here alone until it turned out the
+# copied suite needed it too.
+_SCAN_DIRS = [*_SOURCE_DIRS]
 
 _SANITIZED_ENV_KEYS = {
     "PATH", "SYSTEMROOT", "TEMP", "TMP", "COMSPEC",
@@ -51,6 +65,34 @@ def _root() -> Path:
     if _PROJECT_ROOT is None:
         _PROJECT_ROOT = get_source_checkout_root().resolve()
     return _PROJECT_ROOT
+
+
+def _inside_named_sandbox() -> bool:
+    """
+    True only when the marker names a directory this module was loaded from.
+
+    The sandbox copies the source tree and points PYTHONPATH at the copy, so a
+    genuine re-entry imports this very file from under the sandbox root. That
+    is the fact an ambient setting cannot fake: exporting the variable names
+    no such directory, so the guard does not fire and the dynamic phase runs.
+
+    The marker used to be a bare "1", which made the two cases identical to
+    the reader below. Anyone who set the name got a `recursion_guard` check
+    reporting `passed: True` and a dynamic phase that had run nothing --
+    vacuous success, reachable from the environment, and named in no shipped
+    document. Containment is checked here rather than trusted from the value
+    for the same reason `egress` resolves an address instead of reading a
+    string: the assertion and the fact it asserts have to be the same thing.
+    """
+    marker = os.environ.get(_SANDBOX_MARKER)
+    if not marker:
+        return False
+    try:
+        root = Path(marker).resolve()
+        here = Path(__file__).resolve()
+    except (OSError, ValueError):
+        return False
+    return root.is_dir() and here.is_relative_to(root)
 
 
 def _source_checkout_failure() -> dict | None:
@@ -125,7 +167,12 @@ class _Sandbox:
         # verify_code_dynamic would spawn a sandbox that runs that same test,
         # nesting until the timeouts cascade. Inside the sandbox the dynamic
         # verifier refuses to recurse.
-        clean[_SANDBOX_MARKER] = "1"
+        #
+        # The marker carries the sandbox root rather than "1" so the read site
+        # can tell a real re-entry from an ambient setting. A bare flag made
+        # the two indistinguishable, which meant anyone who exported this name
+        # turned the whole dynamic phase into a pass that ran nothing.
+        clean[_SANDBOX_MARKER] = str(self._path)
         return clean
 
 
@@ -499,7 +546,7 @@ def verify_code_dynamic() -> dict:
     errors = []
     python = sys.executable
 
-    if os.environ.get(_SANDBOX_MARKER):
+    if _inside_named_sandbox():
         # Already inside a verification sandbox — see the guard in _Sandbox.env().
         checks.append({
             "name": "recursion_guard",
@@ -508,6 +555,20 @@ def verify_code_dynamic() -> dict:
         })
         result = _summarize_with_checks(errors, checks)
         return result
+
+    if os.environ.get(_SANDBOX_MARKER):
+        # Set, but not naming a sandbox this process is running inside. The
+        # dynamic phase runs anyway; record that the marker was disregarded
+        # rather than honouring it silently, because the value that reaches
+        # here is the one an operator exported by hand.
+        checks.append({
+            "name": "recursion_guard",
+            "passed": True,
+            "detail": (
+                f"{_SANDBOX_MARKER} is set but does not name a sandbox this "
+                "process is running inside; ignored, dynamic checks run."
+            ),
+        })
 
     with _Sandbox() as sandbox:
         sandbox_env = _Sandbox()

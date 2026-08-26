@@ -244,3 +244,88 @@ def test_verify_output_does_not_pass_over_a_failed_static_phase():
     assert dynamic is not None
     assert dynamic["passed"] is False
     assert dynamic.get("skipped") is True
+
+
+# --- The recursion guard must not be reachable from the environment -------
+#
+# `verify_code_dynamic` returns early, reporting a passing `recursion_guard`
+# check and running nothing, when it believes it is already inside a
+# verification sandbox. That belief used to rest on a bare "1" in
+# AURO_VERIFY_SANDBOX, which anyone could export -- a vacuous pass reachable
+# from the environment and named in no shipped document. The marker now
+# carries the sandbox root and the reader checks containment, so the two
+# cases are distinguishable. These tests drive both directions: the guard
+# must still fire where it is correct, and must not fire where it is not.
+
+
+def _sandbox_root_containing_verify_tools():
+    """The directory a genuine sandbox would name: an ancestor of the module."""
+    from pathlib import Path
+
+    return str(Path(vt.__file__).resolve().parent.parent)
+
+
+def test_an_unset_marker_does_not_trip_the_recursion_guard(monkeypatch):
+    monkeypatch.delenv(vt._SANDBOX_MARKER, raising=False)
+    assert vt._inside_named_sandbox() is False
+
+
+def test_a_marker_naming_the_loaded_tree_trips_the_recursion_guard(monkeypatch):
+    """The legitimate case. Breaking this would let sandboxes nest."""
+    monkeypatch.setenv(vt._SANDBOX_MARKER, _sandbox_root_containing_verify_tools())
+    assert vt._inside_named_sandbox() is True
+
+
+@pytest.mark.parametrize("value", ["1", "true", "", "/nonexistent/sandbox"])
+def test_an_ambient_marker_does_not_trip_the_recursion_guard(monkeypatch, value):
+    """
+    The defect. Each of these was previously indistinguishable from a real
+    re-entry, and each suppressed the entire dynamic phase.
+    """
+    monkeypatch.setenv(vt._SANDBOX_MARKER, value)
+    assert vt._inside_named_sandbox() is False
+
+
+def test_a_marker_naming_an_unrelated_real_directory_is_ignored(monkeypatch, tmp_path):
+    """A directory that exists but does not contain the running module."""
+    monkeypatch.setenv(vt._SANDBOX_MARKER, str(tmp_path))
+    assert vt._inside_named_sandbox() is False
+
+
+def test_the_sandbox_marker_carries_a_root_that_satisfies_the_reader():
+    """
+    Binds the writer to the reader. `_Sandbox.env()` and
+    `_inside_named_sandbox` are the two halves of one control, and a test that
+    only checked the reader would stay green if the writer went back to "1".
+    """
+    with vt._Sandbox() as sandbox:
+        env = vt._Sandbox()
+        env._path = sandbox
+        marker = env.env()[vt._SANDBOX_MARKER]
+
+    assert marker == str(sandbox)
+    assert marker not in ("1", "true")
+
+
+def test_an_ambient_marker_leaves_the_dynamic_phase_reachable(monkeypatch):
+    """
+    The read site must branch on containment, not on the raw variable. Proven
+    by reachability rather than by inspection: with the marker set ambiently,
+    execution must get past the guard and reach the sandbox it would have
+    skipped.
+    """
+    monkeypatch.setenv(vt._SANDBOX_MARKER, "1")
+
+    class _Reached(Exception):
+        pass
+
+    class _ExplodingSandbox:
+        def __enter__(self):
+            raise _Reached()
+
+        def __exit__(self, *exc):
+            return False
+
+    with patch.object(vt, "_Sandbox", _ExplodingSandbox):
+        with pytest.raises(_Reached):
+            vt.verify_code_dynamic()

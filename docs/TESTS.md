@@ -1,6 +1,6 @@
 # Test catalogue
 
-**487 test functions** across 20 files.
+**493 test functions** across 20 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -27,13 +27,13 @@ higher.
 | [`tests/test_support_claims.py`](../tests/test_support_claims.py) | 10 |
 | [`tests/test_documented_messages.py`](../tests/test_documented_messages.py) | 3 |
 | [`tests/test_egress.py`](../tests/test_egress.py) | 10 |
-| [`tests/test_verifier_non_vacuity.py`](../tests/test_verifier_non_vacuity.py) | 12 |
+| [`tests/test_verifier_non_vacuity.py`](../tests/test_verifier_non_vacuity.py) | 18 |
 | [`tests/test_mcp_auth.py`](../tests/test_mcp_auth.py) | 9 |
 | [`tests/test_audit_disclosure.py`](../tests/test_audit_disclosure.py) | 27 |
 | [`tests/test_archive_integrity.py`](../tests/test_archive_integrity.py) | 6 |
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 7 |
 | [`tests/test_release_evidence.py`](../tests/test_release_evidence.py) | 19 |
-| **Total** | **487** |
+| **Total** | **493** |
 
 ---
 
@@ -680,7 +680,7 @@ Outbound HTTP destination control at the connection layer. Which host forms reac
 
 The verifier is subject to the laws it enforces. Every evidence source verify_security() reads is driven to zero or to failure in turn, and the aggregate verdict must not stay green — including the cases that raise no error finding, where a headline pass used to sit on top of a checks list that said the opposite. Passing paths assert numeric counts, not booleans.
 
-12 tests.
+18 tests.
 
 - **the tree verifies clean** — The anchor. Every negative fixture below is measured against this.
 - **the secret scan reports a non zero file count** — A count, not a boolean.
@@ -694,6 +694,12 @@ The verifier is subject to the laws it enforces. Every evidence source verify_se
 - **a failed source control query cannot report a pass** — The original card's headline defect, still live until now: git exits 128 and
 - **a subcheck that crashes cannot report a pass** — A control that reports on a subsystem must not depend on that subsystem
 - **verify output does not pass over a failed static phase** — Same defect one level up. `verify_output` gated the dynamic phase on the
+- **an unset marker does not trip the recursion guard**
+- **a marker naming the loaded tree trips the recursion guard** — The legitimate case. Breaking this would let sandboxes nest.
+- **an ambient marker does not trip the recursion guard** — The defect. Each of these was previously indistinguishable from a real
+- **a marker naming an unrelated real directory is ignored** — A directory that exists but does not contain the running module.
+- **the sandbox marker carries a root that satisfies the reader** — Binds the writer to the reader. `_Sandbox.env()` and
+- **an ambient marker leaves the dynamic phase reachable** — The read site must branch on containment, not on the raw variable. Proven
 
 ---
 
