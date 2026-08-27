@@ -1,6 +1,6 @@
 # Test catalogue
 
-**493 test functions** across 20 files.
+**487 test functions** across 20 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -20,7 +20,7 @@ higher.
 | [`tests/test_sensitive_resource_classification.py`](../tests/test_sensitive_resource_classification.py) | 36 |
 | [`tests/test_file_tool_contracts.py`](../tests/test_file_tool_contracts.py) | 75 |
 | [`tests/test_credentials.py`](../tests/test_credentials.py) | 49 |
-| [`tests/test_registry.py`](../tests/test_registry.py) | 35 |
+| [`tests/test_registry.py`](../tests/test_registry.py) | 29 |
 | [`tests/test_directives.py`](../tests/test_directives.py) | 23 |
 | [`tests/test_end_to_end.py`](../tests/test_end_to_end.py) | 17 |
 | [`tests/test_security_p0.py`](../tests/test_security_p0.py) | 44 |
@@ -33,7 +33,7 @@ higher.
 | [`tests/test_archive_integrity.py`](../tests/test_archive_integrity.py) | 6 |
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 7 |
 | [`tests/test_release_evidence.py`](../tests/test_release_evidence.py) | 19 |
-| **Total** | **493** |
+| **Total** | **487** |
 
 ---
 
@@ -445,7 +445,7 @@ Alias resolution and delivery. The property under test throughout is that a reso
 
 Tool registry shape, project-root and import wiring, the CLI surface, model-backend selection, and two source-hygiene invariants: loggers stay under the auro_runtime namespace, and no absolute home path reaches shipped source.
 
-35 tests.
+29 tests.
 
 ### TestToolRegistryShape
 
@@ -488,18 +488,10 @@ Tool registry shape, project-root and import wiring, the CLI surface, model-back
 - **openai and openai compatible are aliases for the same backend**
 - **unknown backend name raises value error**
 - **resolve model reports the id generate would actually call** — The cost gate needs the resolved id. Without this, `model=None` — the
-### TestHighCostModelGate
+### TestProviderSdkImportIsolation
 
-- **the gate fires when the expensive model comes from the default**
-- **a cheap default is not gated** — Control. Without it, a gate that stopped every call would satisfy the
-- **no high cost list means no gate** — AURO_HIGH_COST_MODELS is empty by default, so the gate is inert.
 - **get backend works even when provider sdks are unimportable** — Simulates neither the anthropic nor the openai SDK being installed by
 - **importing models package does not import provider sdks** — A clean-interpreter check (subprocess, not the sys.modules trick
-### TestModelCallCounter
-
-- **reset call counts starts at zero**
-- **increment call count increments and returns the new total**
-- **reset call counts clears a nonzero count**
 
 ---
 

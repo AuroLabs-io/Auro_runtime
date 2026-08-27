@@ -60,7 +60,7 @@ Currently, the only way to promote a directive is to place the file in `directiv
 
 ## Tools
 
-Only 2 of 12 tools carry authority beyond the local workspace, `http_request` and `generate_text`. `http_request` is the reference implementation of credential-alias delivery. `auth_alias` resolves at call time into the `Authorization` header and is the tool the shipped `credential_proxy.yaml` binds its `no_hardcoded_secrets` guard to. No registered tool spawns a subprocess.
+Only 1 of 11 tools carries authority beyond the local workspace: `http_request`. It is the reference implementation of credential-alias delivery. `auth_alias` resolves at call time into the `Authorization` header and is the tool the shipped `credential_proxy.yaml` binds its `no_hardcoded_secrets` guard to. No registered tool spawns a subprocess.
 
 | Tool                                        | Privilege                                                                                                            |
 | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
@@ -70,7 +70,6 @@ Only 2 of 12 tools carry authority beyond the local workspace, `http_request` an
 | `write_file`, `delete_file`, `restore_file` | write/soft-delete filesystem, only under `output/` and `drafts/`; protected dirs blocked                             |
 | `resolve_secret`                            | reads secret store; never returns the value                                                                          |
 | `http_request`                              | network egress + reads secret (`auth_alias`); destination checked at connect time against the resolved address       |
-| `generate_text`                             | network egress + reads provider API key; per-run cap 10; high-cost gate is a soft speed-bump the model clears itself |
 ## Policies
 
 Policies provide the second layer. They inspect permitted calls outside the model, so enforcement does not depend on the model remembering an instruction or choosing to comply. While they cannot guarantee correct model behavior, they do make specific boundaries durable wherever a guard has been defined.
@@ -266,7 +265,7 @@ The kernel's one job is to make a model's proposed actions refusable before they
 | Embedding application via `execute()` | **Yes** (R3)                        | Must supply a complete security context; `UNRESTRICTED` is the only explicit opt-out. Publishing `docs/API.md` is what makes this tier reachable at all.                                                                         |
 | Operator / deployment                 | **Yes**                             | Sets configuration, including knobs that deliberately weaken the default posture. The runtime does not defend against its own operator.                                                                                          |
 | MCP client                            | **Authenticated, not individuated** | `AURO_MCP_API_KEY` gates streamable-http; the exposed directive set is server-wide and does not have a per-client deployment configuration; no per-caller RBAC.                                                                  |
-| Network destination                   | **No**                              | Every network-capable tool routes through `guarded_request()`. The destination is checked at connect time against the *resolved address*, inside urllib3's `_new_conn()`.                                                        |
+| Network destination                   | **No**                              | `http_request`, the only network-reaching tool, routes through `guarded_request()`. The destination is checked at connect time against the *resolved address*, inside urllib3's `_new_conn()`. **Not covered:** the runtime's own model calls, which bypass the guard by design so a local backend on loopback stays reachable. See Network egress.  |
 
 **Settings that weaken the default posture.** All are operator-set; none is reachable by a model. `AURO_ALLOW_NO_POLICIES` is the environment form of the deliberate opt-out detailed under Opting out below; the rest are single switches.
 
@@ -312,7 +311,9 @@ No enforceable policy rules were loaded from '<dir>'. Every policy guard would b
 Setting `AURO_ALLOW_NO_POLICIES=1` takes that refusal off, and the run proceeds with `UNRESTRICTED` in place of its rules. It emits `unguarded_mode_enabled`, so the log records that the choice was made.
 ### Network egress
 
-`http_request` and `generate_text` both reach the network. Every outbound connection is checked at the point it is opened, against the address it is about to dial.
+`http_request` is the only tool that reaches the network. Every outbound connection it opens is checked at the point it is opened, against the address it is about to dial.
+
+**The runtime's own model calls are not destination-checked.** The agent loop and the directive router call the configured backend directly, and that traffic deliberately bypasses the guard: `GuardedAdapter` replaces the connection classes on its own pool manager rather than mutating the process-global mapping, specifically so the model backend keeps an unguarded pool. The reason is that a local model server is a supported deployment — an Ollama or other OpenAI-compatible endpoint on loopback is exactly the sort of address the guard refuses. `AURO_OPENAI_BASE_URL` therefore redirects the runtime's model traffic to any host, unchecked. That is a deliberate exception rather than an oversight, and the justification is stated here so a reader can judge whether it still holds in their own deployment: if you are not running a local backend, nothing in the runtime narrows where its model traffic may go.
 
 A request is refused when the destination resolves to a loopback, link-local, private, reserved, multicast or unspecified address, to anything not globally routable, or to one of a list of special-purpose ranges — carrier-grade NAT, IETF protocol assignments, 6to4 relay anycast, benchmarking, reserved-for-future-use, IPv4-compatible and NAT64 prefixes, Teredo, 6to4 and 6bone. The ranges are listed explicitly because the standard-library category properties have differed between CPython versions.
 
@@ -566,14 +567,14 @@ Example output:
         {"name": "secret_scan", "passed": true, "detail": "97 files scanned clean"},
         {"name": "sensitive_files", "passed": true, "detail": "No sensitive files staged"},
         {"name": "guard_completeness", "passed": true, "detail": "7 enforceable rules, all guards present"},
-        {"name": "tool_schemas", "passed": true, "detail": "All 12 tools have schemas"}
+        {"name": "tool_schemas", "passed": true, "detail": "All 11 tools have schemas"}
       ]
     },
     {
       "phase": "code_dynamic",
       "passed": true, "error_count": 0, "warn_count": 0,
       "checks": [
-        {"name": "tool_imports", "passed": true, "detail": "12 tools registered"},
+        {"name": "tool_imports", "passed": true, "detail": "11 tools registered"},
         {"name": "policy_validation", "passed": true, "detail": "All policies valid against registries"},
         {"name": "test_suite", "passed": true, "detail": "409 passed, 7 skipped in 21.15s"}
       ]
@@ -649,7 +650,7 @@ The runtime bounds a run's length and little else. Its resource behavior:
 | Concern                 | Behavior                                                           |
 | ----------------------- | ------------------------------------------------------------------ |
 | Steps per run           | Capped: 20 by default, 50 maximum over MCP                         |
-| Model calls per run     | Capped                                                             |
+| Model calls per run     | Bounded by the step cap: one per step, plus one router call        |
 | Model-call timeout      | None on the Anthropic path; 120s on the OpenAI-compatible path     |
 | Tool-call timeout       | None; the step loop has no wall-clock guard                        |
 | Retry / backoff         | None; a model-backend error ends the run                           |
@@ -657,7 +658,9 @@ The runtime bounds a run's length and little else. Its resource behavior:
 | Concurrency             | No application cap; each MCP request runs on a default thread pool |
 | Memory / CPU            | No limit                                                           |
 
-Anything beyond the step and call caps (a model-call timeout, retry, cancellation, a concurrency limit) you must supply around the kernel.
+Model calls are not counted separately — the step cap is what bounds them. The loop makes exactly one model call per step and stops on the first backend error, and the natural-language path adds a single router call before the loop, so a default run makes at most 21 model calls and an MCP run at most 51.
+
+Anything beyond the step cap (a model-call timeout, retry, cancellation, a concurrency limit) you must supply around the kernel.
 
 ## Requirements
 

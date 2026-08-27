@@ -48,9 +48,6 @@ def run_pipeline(
     audit_context = begin_audit_run()
     try:
         set_request_secrets(request_secrets)
-        from auro_runtime.models import reset_call_counts
-        reset_call_counts()
-
         # 1. Intake
         intake_result: IntakeResult = plugins.intake.intake(
             raw_input,

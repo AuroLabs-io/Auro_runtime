@@ -1,7 +1,7 @@
 ---
 id: create_directive
 description: Walk the user through the full lifecycle of designing, drafting, validating, testing, and refining a new workflow directive for the orchestrator. Produces a battle-tested directive file ready to save. Use this whenever a user wants to build a new directive, workflow script, or repeatable task playbook — even if they describe it in plain language without using the word "directive".
-tools: [list_dir, read_file, write_file, validate_directive, list_directives, list_tools, generate_text, echo]
+tools: [list_dir, read_file, write_file, validate_directive, list_directives, list_tools, echo]
 category: system
 ---
 # Create a new directive

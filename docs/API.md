@@ -481,7 +481,6 @@ A tool is reached by naming it in a directive's `tools:` list. What follows is t
 
 | Tool | Arguments | Limits |
 |---|---|---|
-| `generate_text` | `prompt` str · `input_text` str = `""` · `model` str \| None | Hard limit of 10 successful calls per run. The high-cost check matches `AURO_HIGH_COST_MODELS` against the **resolved** model — omitting `model` selects the configured default and is gated on that, not waived. `model` in the result is the resolved id. The "confirmation" is a second identical call, which the calling model can make by itself: it records intent in the transcript, it is not an authorisation control |
 | `resolve_secret` | `alias` str | Returns `{resolved: bool, alias}` and never the value. It is an existence oracle: it discloses which aliases are configured |
 
 ### Introspection
@@ -495,7 +494,7 @@ A tool is reached by naming it in a directive's `tools:` list. What follows is t
 
 Verification is not a registered tool: the `verify_*` functions are operator functions, called directly, never reachable by a model. See the README's Verification section.
 
-**Mutating tools** are `write_file`, `delete_file`, and `restore_file`. They count against the write budget and are covered by the path guards. `generate_text` and `http_request` are not filesystem-mutating but are not free either.
+**Mutating tools** are `write_file`, `delete_file`, and `restore_file`. They count against the write budget and are covered by the path guards. `http_request` is not filesystem-mutating but is not free either.
 
 ---
 

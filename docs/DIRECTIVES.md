@@ -16,7 +16,7 @@ is enforced.
 | Directive | Category | Tools granted |
 |---|---|---:|
 | [`active_debug`](#active-debug) | system | 2 |
-| [`create_directive`](#create-directive) | system | 8 |
+| [`create_directive`](#create-directive) | system | 7 |
 | [`debug_research`](#debug-research) | system | 2 |
 | [`edit_directive`](#edit-directive) | system | 4 |
 | [`file_analysis`](#file-analysis) | task | 2 |
@@ -45,7 +45,7 @@ Authorized tools: `list_dir`, `read_file`
 
 Walk the user through the full lifecycle of designing, drafting, validating, testing, and refining a new workflow directive for the orchestrator. Produces a battle-tested directive file ready to save. Use this whenever a user wants to build a new directive, workflow script, or repeatable task playbook — even if they describe it in plain language without using the word "directive".
 
-Authorized tools: `echo`, `generate_text`, `list_dir`, `list_directives`, `list_tools`, `read_file`, `validate_directive`, `write_file`
+Authorized tools: `echo`, `list_dir`, `list_directives`, `list_tools`, `read_file`, `validate_directive`, `write_file`
 
 ### debug_research
 

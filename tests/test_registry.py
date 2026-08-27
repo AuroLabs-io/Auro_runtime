@@ -28,7 +28,7 @@ from pydantic import BaseModel
 # --- Expected registry shape ------------------------------------------------
 
 _EXPECTED_TOOL_NAMES = frozenset({
-    "delete_file", "echo", "generate_text", "http_request", "list_dir",
+    "delete_file", "echo", "http_request", "list_dir",
     "list_directives", "list_tools", "read_file", "resolve_secret",
     "restore_file", "validate_directive", "write_file",
 })
@@ -54,7 +54,6 @@ _EXPECTED_SCHEMA_BY_TOOL = {
     "validate_directive": "ValidateDirectiveArgs",
     "http_request": "HttpRequestArgs",
     "list_directives": "ListDirectivesArgs",
-    "generate_text": "GenerateTextArgs",
 }
 
 # --- Source-tree scanning helpers -------------------------------------------
@@ -146,7 +145,7 @@ def _home_path_offenders(repo_root: Path):
 
 class TestToolRegistryShape:
     def test_exactly_twelve_tools_registered(self, registry):
-        assert len(registry) == 12
+        assert len(registry) == 11
 
     def test_registered_tool_names_match_expected_set(self, registry):
         assert set(registry.keys()) == _EXPECTED_TOOL_NAMES
@@ -218,7 +217,7 @@ class TestListToolsTool:
     def test_returns_all_twelve_with_descriptions(self, registry):
         list_tools_fn = registry["list_tools"][0]
         result = list_tools_fn(include_args=True)
-        assert result["count"] == 12
+        assert result["count"] == 11
         names = {t["name"] for t in result["tools"]}
         assert names == _EXPECTED_TOOL_NAMES
         for t in result["tools"]:
@@ -245,7 +244,7 @@ class TestListToolsTool:
         result = execute(make_tool_call("list_tools", {}), allowed_tools=UNRESTRICTED, policy_rules=UNRESTRICTED, run_history=[])
         assert result.success is True
         assert result.error is None
-        assert result.result["count"] == 12
+        assert result.result["count"] == 11
 
 
 # =============================================================================
@@ -403,68 +402,14 @@ class TestModelBackendSelection:
         assert resolve_model("explicit-model") == "explicit-model"
 
 
-class TestHighCostModelGate:
+class TestProviderSdkImportIsolation:
     """
-    The gate reads the model that will be called, not the one that was asked
-    for. It previously read `model` directly, so omitting the argument skipped
-    the check and the backend substituted its configured default immediately
-    afterwards — selecting the expensive model just after the guard against it.
+    Constructing a backend must never require a provider SDK to be importable.
+
+    This class was TestHighCostModelGate until 2026-08-26. The three gate tests
+    went with `generate_text`; these two never belonged to the gate and are what
+    the class actually holds.
     """
-
-    def test_the_gate_fires_when_the_expensive_model_comes_from_the_default(self, monkeypatch):
-        monkeypatch.delenv("AURO_MODEL_BACKEND", raising=False)
-        monkeypatch.setenv("AURO_HIGH_COST_MODELS", "opus")
-        monkeypatch.setenv("AURO_MODEL", "claude-opus-4-20250101")
-        from runtime_tools import generate_text_tools
-        from runtime_tools.generate_text_tools import generate_text
-
-        generate_text_tools._REPEAT_CONFIRMED.clear()
-        # `model` deliberately omitted — this is the bypass.
-        result = generate_text(prompt="probe prompt", input_text="x")
-
-        assert result.get("requires_confirmation") is True, (
-            "an expensive model reached the backend without passing the cost gate"
-        )
-        assert result["model"] == "claude-opus-4-20250101", (
-            "the gate must name the model it actually resolved"
-        )
-
-    def test_a_cheap_default_is_not_gated(self, monkeypatch):
-        """
-        Control. Without it, a gate that stopped every call would satisfy the
-        test above. Proved by getting *past* the gate: the call goes on to fail
-        at credential resolution, which only happens after the gate allows it.
-        """
-        monkeypatch.delenv("AURO_MODEL_BACKEND", raising=False)
-        monkeypatch.setenv("AURO_HIGH_COST_MODELS", "opus")
-        monkeypatch.setenv("AURO_MODEL", "claude-haiku-4-5-20251001")
-        monkeypatch.delenv("AURO_ANTHROPIC_API_KEY_ALIAS", raising=False)
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        from runtime_tools import generate_text_tools
-        from runtime_tools.generate_text_tools import generate_text
-
-        generate_text_tools._REPEAT_CONFIRMED.clear()
-        result = generate_text(prompt="probe prompt", input_text="x")
-
-        assert result.get("requires_confirmation") is None, (
-            "a cheap model was gated, so the parametrized gate test proves nothing"
-        )
-        assert "error" in result, "expected the call to proceed past the gate and then fail"
-
-    def test_no_high_cost_list_means_no_gate(self, monkeypatch):
-        """AURO_HIGH_COST_MODELS is empty by default, so the gate is inert."""
-        monkeypatch.delenv("AURO_MODEL_BACKEND", raising=False)
-        monkeypatch.delenv("AURO_HIGH_COST_MODELS", raising=False)
-        monkeypatch.setenv("AURO_MODEL", "claude-opus-4-20250101")
-        monkeypatch.delenv("AURO_ANTHROPIC_API_KEY_ALIAS", raising=False)
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        from runtime_tools import generate_text_tools
-        from runtime_tools.generate_text_tools import generate_text
-
-        generate_text_tools._REPEAT_CONFIRMED.clear()
-        result = generate_text(prompt="probe prompt", input_text="x")
-
-        assert result.get("requires_confirmation") is None
 
     def test_get_backend_works_even_when_provider_sdks_are_unimportable(self, monkeypatch):
         """
@@ -491,7 +436,7 @@ class TestHighCostModelGate:
         """
         A clean-interpreter check (subprocess, not the sys.modules trick
         above) that plain `import auro_runtime.models` — and the
-        `runtime_tools` import that pulls in generate_text_tools — never
+        `runtime_tools` import that registers the built-in tools — never
         eagerly imports anthropic or openai, regardless of whether those
         packages happen to be pip-installed in this dev environment.
         """
@@ -512,49 +457,3 @@ class TestHighCostModelGate:
         )
         assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
         assert "OK" in proc.stdout
-
-
-# =============================================================================
-# Per-run model-call counter
-# =============================================================================
-
-
-class TestModelCallCounter:
-    """
-    reset_call_counts/get_call_count/increment_call_count share a module-level
-    ContextVar. Outside of async/threaded code, a ContextVar behaves like a
-    plain shared global across tests in the same process, so this class resets
-    it before AND after every test here — before, so an earlier test file's
-    leftover count can't leak in; after, so this file's activity can't leak
-    into whatever runs next in the same session.
-    """
-
-    @pytest.fixture(autouse=True)
-    def _isolated_counter(self):
-        from auro_runtime.models import reset_call_counts
-
-        reset_call_counts()
-        yield
-        reset_call_counts()
-
-    def test_reset_call_counts_starts_at_zero(self):
-        from auro_runtime.models import get_call_count
-
-        assert get_call_count() == 0
-
-    def test_increment_call_count_increments_and_returns_the_new_total(self):
-        from auro_runtime.models import get_call_count, increment_call_count
-
-        assert increment_call_count() == 1
-        assert get_call_count() == 1
-        assert increment_call_count() == 2
-        assert get_call_count() == 2
-
-    def test_reset_call_counts_clears_a_nonzero_count(self):
-        from auro_runtime.models import get_call_count, increment_call_count, reset_call_counts
-
-        increment_call_count()
-        increment_call_count()
-        assert get_call_count() == 2
-        reset_call_counts()
-        assert get_call_count() == 0

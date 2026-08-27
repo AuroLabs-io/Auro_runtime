@@ -9,16 +9,14 @@ never requires a provider SDK to be installed.
 generate(...) is the module-level convenience shim callers use instead of
 importing a specific backend directly.
 
-This module also owns the per-run model-call counter (build plan F6): the
-kernel (auro_runtime.pipeline.runner) resets it at the start of each run, and
-tools such as runtime_tools.generate_text_tools import it from here — so the
-dependency points tools -> kernel, and the kernel never imports from the
-tools package.
+This module owned the per-run model-call counter (build plan F6) until
+2026-08-26. The counter was removed with generate_text, its only caller: with
+nothing left to increment it, an exported accessor would have read zero for
+the life of every run while the README claimed a cap. Model calls are now
+bounded by the orchestrator's step cap instead.
 """
 
 import os
-from contextvars import ContextVar
-
 from auro_runtime.models.base import ModelBackend
 
 __all__ = [
@@ -26,9 +24,6 @@ __all__ = [
     "get_backend",
     "generate",
     "resolve_model",
-    "reset_call_counts",
-    "get_call_count",
-    "increment_call_count",
 ]
 
 DEFAULT_BACKEND = "anthropic"
@@ -71,31 +66,13 @@ def resolve_model(model: str | None = None) -> str:
     """
     The model id a `generate(model=...)` call would actually use.
 
-    Answers "what will this cost?" before committing to the call. Gates must
-    read this rather than the requested id — passing `model=None` is the normal
-    way to ask for the configured default, and a gate that only inspects the
-    argument sees nothing at all in exactly that case.
+    Answers "what will this cost?" before committing to the call. No shipped
+    gate consults it today — the one that did was cut with its tool on
+    2026-08-26. It is kept because the question it answers is real and the
+    lesson it encodes is worth not relearning: a check that reads the
+    *requested* id sees nothing when `model=None`, which is the normal way to
+    ask for the configured default, and the backend then substitutes that
+    default immediately afterwards.
     """
     return get_backend().resolve_model(model)
 
-
-# --- Per-run model-call counter (owned here per F6; tools import it, never the reverse) ---
-
-_call_count: ContextVar[int] = ContextVar("auro_model_call_count", default=0)
-
-
-def reset_call_counts() -> None:
-    """Reset the per-run model-call counter. Called by the pipeline at the start of each run."""
-    _call_count.set(0)
-
-
-def get_call_count() -> int:
-    """Return the number of model calls recorded so far in this run."""
-    return _call_count.get()
-
-
-def increment_call_count() -> int:
-    """Record one model call in this run and return the new total."""
-    count = _call_count.get() + 1
-    _call_count.set(count)
-    return count

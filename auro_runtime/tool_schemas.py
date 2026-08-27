@@ -91,8 +91,3 @@ class HttpRequestArgs(_ToolArgs):
 class ListDirectivesArgs(_ToolArgs):
     category: str | None = Field(default=None, description="Optional filter by category: system, task, security, or debug")
 
-
-class GenerateTextArgs(_ToolArgs):
-    prompt: str = Field(..., min_length=1, description="The prompt/instruction for the LLM")
-    input_text: str = Field(default="", description="Optional input text to process (appended to prompt)")
-    model: str | None = Field(default=None, description="Model identifier (backend-specific); defaults to the configured backend's default.")
