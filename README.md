@@ -180,7 +180,7 @@ The shipped guards use the following codes:
 Suppose the active directive permits `read_file`, and the model proposes:
 
 ```Python
-read_file(path="auro_secrets.py")
+read_file(path="auro_secrets.yaml")
 ```
 
 The call passes directive scope because `read_file` is allowed. The `sensitive_paths` policy applies to that tool, so the runtime passes the call to `check_sensitive_paths`.
@@ -199,7 +199,7 @@ GuardVerdict(
 The complete path through the runtime looks like this:
 
 ```
-Model proposes read_file("auro_secrets.py")
+Model proposes read_file("auro_secrets.yaml")
                     ↓
 Directive permits read_file
                     ↓
@@ -450,7 +450,7 @@ MCP startup also requires `AURO_WORKSPACE_ROOT` (or `--workspace`) to name a dir
 The wheel carries reviewed default policies and directives as package resources. Runtime tools expose those resources through read-only `directives/` and `policies/` mounts; writes, restores, deletes, drafts, archives, and the default audit log remain in the workspace. `AURO_WORKSPACE_ROOT` selects that writable workspace and is frozen on first resolution. The deprecated `AURO_ROOT` name may still select workspace state for local compatibility, but neither variable can redirect executable directives, policies, or Python imports.
 ## Operational audit
 
-The runtime records all call refusals, errors, and any changes made to disk. Each event is one line of JSON appended to `auro_audit.jsonl` in the workspace. `AURO_AUDIT_LOG` can be configured to point somewhere else if you prefer:
+The runtime records call refusals, errors, and changes made to disk. A few events are also written when a call is approved — resource classification records its verdict either way — though guards themselves stay silent on approval, as described above. Each event is one line of JSON appended to `auro_audit.jsonl` in the workspace. `AURO_AUDIT_LOG` can be configured to point somewhere else if you prefer. [`docs/AUDIT_EVENTS.md`](docs/AUDIT_EVENTS.md) catalogues every event name the runtime emits and the fields each one carries:
 
 ```json
 {
@@ -511,7 +511,7 @@ During a pipeline run, events accumulate in memory and are written once at the e
 
 The scrubbing currently works from a fixed list. A value is removed if it matches one of the credential shapes defined in `auro_runtime/sanitization.py`, or if it sits under a key name like `token` or `password`. A secret that does neither will leak through. Keep credentials out of prompts and tool payloads and use aliases for delivery, rather than relying on this pass to catch them.
 
-This log is best-effort and append-written. It does not hold any durability guarantees. It records what the runtime did but it does not address the application's own events or lasting state. Those need persistence at the embedding application layer.
+This log is best-effort and append-written. It does not hold any durability guarantees. It records what the runtime did but it does not address the application's own events or lasting state. Those need persistence at the embedding application layer. [`docs/FAQ.md`](docs/FAQ.md) covers what that means in practice — why this is not an immutable event store, why a `sequence` gap cannot distinguish a rejected record from a lost one, and where to integrate forwarding or signing if you need them.
 
 A run buffers its audit events and writes them once at the end, so a failed write loses the whole run's trail rather than one line of it. `meta["audit_persisted"]` is false when that happens, and `meta["audit_errors"]` identifies how many records were lost out of how many were held. Neither field carries the sink's path as that would put the deployment's filesystem layout into a value the caller receives. The path and the underlying error go to Python's logging under `auro_runtime.audit`, which reaches stderr unless the embedding application routes it elsewhere.
 
@@ -554,7 +554,7 @@ Example output:
       "phase": "code_static",
       "passed": true, "error_count": 0, "warn_count": 0,
       "checks": [
-        {"name": "syntax_check", "passed": true, "detail": "37 Python files parsed"},
+        {"name": "syntax_check", "passed": true, "detail": "38 Python files parsed"},
         {"name": "directive_validation", "passed": true, "detail": "13 directives valid"},
         {"name": "policy_yaml_parse", "passed": true, "detail": "3 policy files valid"},
         {"name": "file_layout", "passed": true, "detail": "All expected directories present"}
@@ -564,9 +564,9 @@ Example output:
       "phase": "security",
       "passed": true, "error_count": 0, "warn_count": 0,
       "checks": [
-        {"name": "secret_scan", "passed": true, "detail": "97 files scanned clean"},
+        {"name": "secret_scan", "passed": true, "detail": "107 files scanned clean"},
         {"name": "sensitive_files", "passed": true, "detail": "No sensitive files staged"},
-        {"name": "guard_completeness", "passed": true, "detail": "7 enforceable rules, all guards present"},
+        {"name": "guard_completeness", "passed": true, "detail": "7 enforceable rules, 7 guards, bound in both directions"},
         {"name": "tool_schemas", "passed": true, "detail": "All 11 tools have schemas"}
       ]
     },
@@ -576,7 +576,7 @@ Example output:
       "checks": [
         {"name": "tool_imports", "passed": true, "detail": "11 tools registered"},
         {"name": "policy_validation", "passed": true, "detail": "All policies valid against registries"},
-        {"name": "test_suite", "passed": true, "detail": "409 passed, 7 skipped in 21.15s"}
+        {"name": "test_suite", "passed": true, "detail": "714 passed, 8 skipped in 42.85s"}
       ]
     }
   ]
@@ -587,12 +587,12 @@ If either of the first two phases fails, the dynamic phase does not run. A phase
 
 **Phases:**
 - Static checks parse every source file and validate directive front matter. 
-- Security checks scan the whole tree for secret patterns, confirm no sensitive file is staged for commit, and confirm that every enforceable policy rule names a guard the registry actually holds. 
+- Security checks scan the whole tree for secret patterns, confirm no sensitive file is staged for commit, and check the rule/guard binding in both directions: every enforceable rule names a guard the registry holds, and every registered guard is bound by some rule. 
 - Dynamic checks import the tools, validate policies against the live registries, and run the test suite inside a temporary project copy with a sanitized environment.
 
 ---
 
-_note: Only one direction of the guard check runs in the security phase. It catches a rule pointing at a guard that does not exist. The reverse case, a guard registered in code that no policy rule ever binds, is caught by the test suite, which runs in the dynamic phase: the phase that is skipped when an earlier one errors. Meaning that a tree with a static error can go a whole gate run without anything checking for orphaned guards._
+_note: The guard check runs in both directions, and it runs in the security phase, which still runs when the static phase has failed. It catches a rule pointing at a guard that does not exist, and it catches the reverse — a guard registered in code that no policy rule ever binds, which reads as protection while inspecting nothing. A zero-scope result is a failure rather than a pass: no enforceable rules loaded reports that guard coverage verified nothing, instead of reporting that every guard was present._
 
 ---
 
