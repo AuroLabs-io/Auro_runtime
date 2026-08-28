@@ -11,7 +11,7 @@ Reference for embedding the runtime, driving the executor directly, and extendin
 - [Adding a tool](#adding-a-tool)
 - [Adding a guard](#adding-a-guard)
 - [Embedding and operating](#embedding-and-operating) — policy profile, secrets, audit, paths
-- [Tool reference](#tool-reference) — argument contracts for the 12 shipped tools
+- [Tool reference](#tool-reference) — argument contracts for the 11 shipped tools
 - [MCP server](#mcp-server)
 
 ---
@@ -106,7 +106,7 @@ proceed without it on purpose.
 ### Assembling the context
 
 ```python
-import runtime_tools  # registers the 12 shipped tools
+import runtime_tools  # registers the 11 shipped tools
 
 from auro_runtime.directive import allowed_tools_for, load_directive_by_id
 from auro_runtime.paths import get_directives_dir, get_policies_dir
@@ -477,7 +477,7 @@ A tool is reached by naming it in a directive's `tools:` list. What follows is t
 |---|---|---|
 | `http_request` | `url` str · `method` str = `GET` · `headers` dict \| None · `body` str \| None · `timeout` int = 30 (1–120) · `auth_alias` str \| None · `auth_scheme` str = `Bearer` | GET and POST only. Response body truncated at 10 000 characters, flagged by `truncated`. `auth_alias` is resolved at call time and injected; a raw token in `headers` is refused by the `no_hardcoded_secrets` guard. The destination is checked at connection time against the **resolved IP address**, on the initial request and again on every redirect hop; loopback, private, link-local and any address that is not globally routable are refused. A request is refused outright when an HTTP proxy is configured, because the check cannot see the real destination through one |
 
-### Model and credentials
+### Credentials
 
 | Tool | Arguments | Limits |
 |---|---|---|

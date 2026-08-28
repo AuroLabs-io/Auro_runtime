@@ -37,7 +37,7 @@ A small set of environment variables can deliberately weaken the default posture
 - `AURO_RUNTIME_WRITABLE_DIRS` / `AURO_RUNTIME_DELETE_ALLOWLISTED_DIRS` — replace the filesystem write and soft-delete allowlists. They still refuse to name a protected directory (the runtime raises at startup if you try).
 - `AURO_OPENAI_BASE_URL` — redirects model traffic to a different endpoint.
 
-The full list of environment variables and their defaults belongs in the configuration reference; this entry names only the ones that change the security posture.
+This entry names only the variables that change the security posture; the README's "Settings that weaken the default posture" list is the same set.
 
 ## Operations
 
@@ -49,7 +49,7 @@ If you need a durable or tamper-evident trail, treat `write_audit_records()` tog
 
 ### What are the performance limits — timeouts, retries, concurrency?
 
-The runtime bounds the number of steps per run (default 20, clamped to 50 when driven over MCP) and the number of model calls per run. It does not provide, and you must supply if you need them:
+The runtime bounds the number of steps per run (default 20, clamped to 50 when driven over MCP). Model calls are not counted separately — the step cap is what bounds them: the loop makes exactly one model call per step and stops on the first backend error, and the natural-language path adds one router call before the loop, so a default run makes at most 21 model calls and an MCP run at most 51. It does not provide, and you must supply if you need them:
 
 - a model-call timeout on the Anthropic backend (the OpenAI-compatible backend uses a fixed 120-second timeout; the HTTP tool defaults to 30 seconds);
 - automatic retry or backoff — a model-backend error ends the run;
