@@ -198,6 +198,29 @@ def _python_in(venv_root: Path) -> Path:
     return venv_root / "bin" / "python"
 
 
+def _console_script_in(venv_root: Path) -> Path:
+    """The entry point setuptools generates from ``[project.scripts]``.
+
+    This is a different artifact from the module CLI: pip writes it at install
+    time from ``entry_points.txt``, so it can be absent or broken while
+    ``python -m auro_runtime`` works perfectly.
+    """
+    if os.name == "nt":
+        return venv_root / "Scripts" / "auro-runtime.exe"
+    return venv_root / "bin" / "auro-runtime"
+
+
+def _normalise_prog(text: str) -> str:
+    """Erase the program name argparse derives from ``argv[0]``.
+
+    ``python -m auro_runtime`` reports itself as ``__main__.py`` and the console
+    script as ``auro-runtime``.  That difference is correct -- each names the
+    command the reader actually typed -- so it must not count as a divergence
+    when the two invocations are compared.
+    """
+    return text.replace("__main__.py", "PROG").replace("auro-runtime", "PROG")
+
+
 def _last_json_line(stdout: str) -> dict:
     try:
         value = json.loads(stdout)
@@ -949,3 +972,187 @@ def test_nonisolated_source_contamination_trips_provenance_check(
     ), payload
     with pytest.raises(AssertionError, match="outside the installed venv"):
         _assert_installed_provenance(payload, install, workspace)
+
+
+# The README states, at the head of its usage section: "Installing puts an
+# `auro-runtime` command on your path. Every `python -m auro_runtime ...`
+# example below works as `auro-runtime ...` on an installed copy."
+#
+# That is a claim quantified over every CLI example in the document, and until
+# 2026-08-28 nothing executed the console script at all -- the whole suite drove
+# `python -m`. These two cases put a runner behind the claim.
+_README_INVOCATIONS = [
+    pytest.param(["--help"], id="help"),
+    pytest.param(
+        ["run", "--directive", "tool_catalog", "list the available tools"],
+        id="run-tool-catalog",
+    ),
+    pytest.param(
+        ["mcp", "--transport", "streamable-http", "--host", "127.0.0.1", "--port", "8971"],
+        id="mcp-streamable-http",
+    ),
+]
+
+
+@pytest.mark.parametrize("argv", _README_INVOCATIONS)
+def test_the_console_script_dispatches_exactly_like_the_module_cli(
+    installed_distribution: InstalledDistribution,
+    tmp_path: Path,
+    argv: list[str],
+) -> None:
+    """The README's `auro-runtime ...` promise, run rather than read.
+
+    Law 4 -- a claim is not a result.  The README's promise is a claim, and it
+    stood unexecuted from the day the entry point was declared: the whole suite
+    drove `python -m` and nothing invoked the generated script, so "the console
+    script works" was an inference from `entry_points.txt` being present.
+
+    Law 16f -- a document that shows a result is a test that has not been run.
+    This is the runner that law asks for, attached to the one README sentence
+    that quantifies over every CLI example in the document.
+
+    Parity is the assertion, not success: several of these invocations are
+    expected to fail, and they must fail *identically* whichever way they were
+    started.  A console script that dispatched somewhere else would show up here
+    as a differing exit code even though both commands "ran".
+
+    The non-vacuity anchor is the existence check below rather than the
+    comparison (law 1): two commands that both failed to start at all would
+    agree on everything and prove nothing, so the script must be shown to exist
+    before its behaviour is compared to anything.
+    """
+    install = installed_distribution
+    script = _console_script_in(install.root)
+    assert script.exists(), (
+        f"pip installed no console script at {script}; the README tells every "
+        "adopter this command is on their path"
+    )
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    # No model backend is configured, so the `run` case fails at the backend --
+    # which is fine and is itself part of the parity being asserted.
+    env = install.clean_env(workspace)
+
+    def invoke(command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            command,
+            # A neutral cwd, deliberately not the hostile one the provenance
+            # probes use. The two invocations are genuinely asymmetric about the
+            # working directory: `python -m` puts cwd on sys.path and the
+            # generated console script does not, so running this from the
+            # hostile cwd compares a booby-trapped import against a clean one
+            # and reports a dispatch difference that is really a sys.path
+            # difference. Cwd shadowing is a real property with its own tests
+            # above; this one is about dispatch.
+            cwd=workspace,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=120,
+        )
+
+    as_module = invoke([str(install.python), "-B", "-m", "auro_runtime", *argv])
+    as_script = invoke([str(script), *argv])
+
+    assert as_module.returncode == as_script.returncode, (
+        f"`python -m auro_runtime {' '.join(argv)}` exited "
+        f"{as_module.returncode} but `auro-runtime {' '.join(argv)}` exited "
+        f"{as_script.returncode}; the README promises they are interchangeable\n"
+        f"module stderr:\n{as_module.stderr}\nscript stderr:\n{as_script.stderr}"
+    )
+    assert _normalise_prog(as_module.stdout) == _normalise_prog(as_script.stdout), (
+        "the two invocations printed different stdout once the argparse program "
+        "name is normalised"
+    )
+    assert _normalise_prog(as_module.stderr) == _normalise_prog(as_script.stderr), (
+        "the two invocations printed different stderr once the argparse program "
+        "name is normalised"
+    )
+
+
+# Each entry is (extra environment, argv tail, the substring the README promises).
+# The README's remote-transport section states that AURO_MCP_API_KEY is mandatory
+# on streamable-http and must be ASCII, and that binding a non-loopback host
+# additionally requires --public-url. Those exits were verified against the
+# source checkout on 2026-08-27; this pins them to the installed wheel, which is
+# the artifact an adopter actually runs.
+_DOCUMENTED_TRANSPORT_REFUSALS = [
+    pytest.param({}, ["--host", "127.0.0.1", "--port", "8981"],
+                 "AURO_MCP_API_KEY must be set", id="missing-key"),
+    pytest.param({"AURO_MCP_API_KEY": "k\u00e9y-with-accent"},
+                 ["--host", "127.0.0.1", "--port", "8982"],
+                 "must be ASCII", id="non-ascii-key"),
+    pytest.param({"AURO_MCP_API_KEY": "ascii-key-123"},
+                 ["--host", "0.0.0.0", "--port", "8983"],
+                 "--public-url is required", id="non-loopback-without-public-url"),
+]
+
+
+@pytest.mark.parametrize("extra_env,argv_tail,expected", _DOCUMENTED_TRANSPORT_REFUSALS)
+def test_the_installed_wheel_refuses_every_documented_unsafe_transport(
+    installed_distribution: InstalledDistribution,
+    tmp_path: Path,
+    extra_env: dict[str, str],
+    argv_tail: list[str],
+    expected: str,
+) -> None:
+    """Three documented refusals, against the wheel rather than the checkout.
+
+    These exits were verified against the source checkout on 2026-08-27.  Law 4
+    again: that established the claim for a tree, not for the artifact an
+    adopter installs, and those are different objects -- the whole reason this
+    module exists.
+
+    Law 3 -- fail closed by default.  Each case is a configuration the runtime
+    must refuse to start rather than serve, and the refusal is the safe
+    direction: an unauthenticated listener is the failure being prevented.
+
+    Law 7b -- enumerate the input shapes, not only the call sites.  One call
+    site, three shapes: key absent, key present but unusable, and host/flag
+    combination unsafe.  Testing the transport once would have covered the call
+    site and none of the shapes.
+
+    Non-vacuity is structural here (law 1): every one of these configurations
+    would otherwise start a listening server and block until the timeout, so a
+    guard that stopped refusing fails this test by hanging rather than by
+    passing quietly.
+
+    Known bound, recorded rather than left implicit -- law 1c asks for both
+    directions and this file automates only the refusals.  The permit direction
+    was verified by hand on 2026-08-28 and deliberately not automated: an ASCII
+    key on a loopback host starts a listener and blocks, which is the correct
+    behaviour and is also why it is a poor fit for this matrix -- asserting it
+    means binding a port and tearing down a live server on every run.
+
+    That hand check is what makes the non-vacuity argument above concrete
+    rather than assumed.  Permitting means blocking on a listener, so a guard
+    that stopped refusing would block too, and these cases would fail on the
+    timeout rather than pass quietly.  The claim was checked before being
+    relied on -- law 4, and law 16f, which is the law this file was extended to
+    serve.
+    """
+    install = installed_distribution
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    proc = subprocess.run(
+        [
+            str(_console_script_in(install.root)),
+            "mcp", "--transport", "streamable-http", *argv_tail,
+        ],
+        cwd=install.hostile_cwd,
+        env=install.clean_env(workspace, extra_env),
+        text=True,
+        capture_output=True,
+        timeout=120,
+    )
+
+    assert proc.returncode != 0, (
+        "the installed runtime started a streamable-http listener for a "
+        f"configuration the README says it refuses: {argv_tail} {extra_env}"
+    )
+    combined = proc.stdout + proc.stderr
+    assert expected in combined, (
+        f"expected the documented refusal {expected!r}, got:\n{combined}"
+    )

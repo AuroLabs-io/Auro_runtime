@@ -325,34 +325,33 @@ Two behaviours to know before deploying:
 
 ## Install
 
-```bash
-pip install auro-runtime
-pip install "auro-runtime[anthropic]"           # Anthropic with an environment key
-pip install "auro-runtime[anthropic,keyring]"   # Anthropic with an OS credential store
-```
+Two supported routes, and the install line depends on which model backend you intend to use. Neither is more supported than the other; the Anthropic SDK is an optional extra only because a local or OpenAI-compatible setup should not have to install it.
 
-Or from a source checkout:
+**Anthropic.** The default backend. Its SDK ships as an extra, so name it at install time:
 
 ```bash
-pip install .
-pip install -e ".[dev]"    # editable, with test dependencies
-```
-
-Set a model backend. Anthropic is the default:
-
-```bash
+pip install "auro-runtime[anthropic]"
+pip install "auro-runtime[anthropic,keyring]"   # ...with an OS credential store
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Or point it at anything speaking the OpenAI chat-completions API, including a local Ollama:
+**Any OpenAI-compatible endpoint, including a local Ollama.** No extra is needed:
 
 ```bash
+pip install auro-runtime
 export AURO_MODEL_BACKEND=openai_compatible
 export AURO_OPENAI_BASE_URL=http://localhost:11434/v1
 export AURO_OPENAI_MODEL=llama3.2:3b
 ```
 
 For this local Ollama example, no API key is needed. `AURO_OPENAI_API_KEY` is sent only when set.
+
+Or from a source checkout, with the same choice of extras:
+
+```bash
+pip install .
+pip install -e ".[dev]"    # editable, with test dependencies
+```
 
 ---
 
@@ -362,7 +361,7 @@ _note: Installing puts an `auro-runtime` command on your path. Every `python -m 
 
 ## Run something
 
-A directive plus a request is the whole invocation. This one runs the shipped `tool_catalog` directive, which enumerates every registered tool, and it is the cheapest way to confirm a working install:
+A directive plus a request is the whole invocation. This one runs the shipped `tool_catalog` directive, which enumerates every registered tool, and it is the cheapest way to confirm a working install. It exercises whichever model backend you configured above, so a failure names its own cause — a backend SDK that was never installed, or an endpoint that did not answer:
 
 ```bash
 python -m auro_runtime run --directive tool_catalog "list the available tools"
