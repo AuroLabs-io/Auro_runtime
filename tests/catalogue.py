@@ -125,6 +125,12 @@ FILE_PURPOSE = {
         "Pins the publication gate to one explicit Git commit and tree. A dirty "
         "checkout, a different expected commit, or ambient source content must not "
         "produce release evidence for the reviewed tree.",
+    "test_publish_release.py":
+        "Pins the upload gate to the evidence record that vouches for the files. "
+        "An incomplete release, a candidate nobody asserted as publishable, an "
+        "artifact whose bytes no longer match the record, or an untested file "
+        "sitting beside the tested ones must each refuse the upload rather than "
+        "publish it.",
 }
 
 FILE_ORDER = list(FILE_PURPOSE)

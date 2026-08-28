@@ -603,12 +603,33 @@ _note: The guard check runs in both directions, and it runs in the security phas
 pip install -e ".[dev]" twine
 python -B release_evidence.py \
   --expected-commit "$(git rev-parse HEAD)" \
+  --source-ref refs/heads/main \
+  --publication-candidate \
   --output-dir dist
 ```
 
 The command refuses unless the supplied 40-character id is `HEAD`, the index tree equals that commit's tree, and `git status --porcelain --untracked-files=all` is empty. It exports that commit with `git archive`, builds one wheel and one sdist from the export, runs `twine check`, and drives the mandatory distribution matrix against those exact artifacts. A successful output directory contains the wheel, the sdist, and `release-evidence.json`; the record binds their filenames, sizes, and SHA-256 digests to the commit, commit/index tree ids, toolchain versions, clean-before-and-after state, and a non-zero pytest count.
 
+`--source-ref` records the ref the build was triggered for, and `--publication-candidate` is your assertion that it is a ref this project publishes from. The command cannot know that on its own — the publishable branch is repository policy, and a branch list hardcoded in the script would be a hand-maintained inventory wearing the costume of a control. Recording the ref beside the assertion is what makes the assertion auditable. **Omitting the flag means no**: an unlabelled run is recorded as evidence for a tree, not as a release candidate, and cannot be published by the command below. Drop both flags when you are verifying a branch rather than preparing a release.
+
+Write the ref out literally rather than deriving it in the shell. `git symbolic-ref -q HEAD` looks like the obvious substitution and is a trap: on a detached HEAD it produces an empty string, and an empty `--source-ref` is currently recorded as a null ref beside a true assertion rather than refused. Naming the ref by hand is also the honest shape of the thing — the flag is your assertion about repository policy, not something the shell can derive for you.
+
 CI supplies GitHub's workflow commit as `--expected-commit` and retains the three files together. The retained candidate is evidence for that workflow identity; it is not evidence for an artifact rebuilt later from a local checkout.
+
+### Publishing a candidate
+
+`publish_release.py` uploads artifacts that a record already vouches for. It **builds nothing** — there is no build path in it at all, so the artifacts it uploads are necessarily the ones that were tested rather than a rebuild that happens to share their version number. Point it at the directory `release_evidence.py` produced, or at the candidate CI retained:
+
+```bash
+python -B publish_release.py \
+  --evidence-dir dist \
+  --repository testpypi \
+  --dry-run
+```
+
+Every gate runs before anything leaves the machine. The record must assert `release_complete` and `publication_candidate`; every file it names must be present, the right size, and match its recorded SHA-256; and the directory must contain **no** artifact the record does not name, since a file travelling beside the tested ones is a file nobody tested. Any failure refuses the upload, and rebuilding is not a recovery this command offers — go back and produce a record for what you actually want to publish.
+
+`--dry-run` runs all of it and stops before uploading, which needs no credentials and no network. Rehearse there first: a version number cannot be reused once consumed, on TestPyPI or on PyPI. Drop `--dry-run` and set `--repository pypi` for the real thing. `--repository` has no default, because neither possible default is safe to get by forgetting to choose. Credentials are twine's: it reads `TWINE_USERNAME` and `TWINE_PASSWORD` or `~/.pypirc` in its own process, and this script never sees, stores, or logs them.
 
 ---
 

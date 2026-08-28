@@ -1,6 +1,6 @@
 # Test catalogue
 
-**489 test functions** across 20 files.
+**505 test functions** across 21 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -33,7 +33,8 @@ higher.
 | [`tests/test_archive_integrity.py`](../tests/test_archive_integrity.py) | 6 |
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 9 |
 | [`tests/test_release_evidence.py`](../tests/test_release_evidence.py) | 19 |
-| **Total** | **489** |
+| [`tests/test_publish_release.py`](../tests/test_publish_release.py) | 16 |
+| **Total** | **505** |
 
 ---
 
@@ -813,3 +814,38 @@ Pins the publication gate to one explicit Git commit and tree. A dirty checkout,
 - **an asserted publishable ref is recorded as a candidate** — The non-vacuity anchor for every case below.
 - **a ref nobody asserted is not a publication candidate** — Fail closed, and state the valence: an unlabelled run is not a candidate.
 - **a pull request ref cannot be asserted as a publication candidate** — The one wrong combination that needs no branch policy to recognise.
+
+---
+
+## `tests/test_publish_release.py`
+
+Pins the upload gate to the evidence record that vouches for the files. An incomplete release, a candidate nobody asserted as publishable, an artifact whose bytes no longer match the record, or an untested file sitting beside the tested ones must each refuse the upload rather than publish it.
+
+16 tests.
+
+### TestTheGateLetsAGoodCandidateThrough
+
+- **a verified candidate passes every gate**
+- **the expected commit check passes on the right commit**
+### TestTheRecordMustVouchForTheUpload
+
+- **a directory with no record is refused**
+- **an incomplete release is refused**
+- **a candidate nobody asserted as publishable is refused** — The first consequence `publication_candidate` has ever carried.
+- **a record for a different commit is refused**
+- **a record that is not json is refused**
+### TestTheFilesMustBeTheOnesThatWereTested
+
+- **a tampered artifact of the same length is refused** — Same length, different bytes -- the case only the digest can catch.
+- **an artifact of the wrong size is refused**
+- **a missing artifact is refused**
+- **an artifact the record does not name is refused** — The direction that catches a rebuild dropped in beside the tested files.
+- **a record naming no artifacts is refused**
+### TestTheDestinationIsNeverImplicit
+
+- **an unknown repository is refused**
+- **the parser requires a repository** — No default means forgetting to choose cannot pick the irreversible one.
+### TestTheGuardsAreLoadBearing
+
+- **record verification rejects each disqualification**
+- **artifact verification needs both directions**
