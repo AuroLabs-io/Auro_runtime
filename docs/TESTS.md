@@ -1,6 +1,6 @@
 # Test catalogue
 
-**511 test functions** across 21 files.
+**520 test functions** across 21 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -22,7 +22,7 @@ higher.
 | [`tests/test_credentials.py`](../tests/test_credentials.py) | 49 |
 | [`tests/test_registry.py`](../tests/test_registry.py) | 30 |
 | [`tests/test_directives.py`](../tests/test_directives.py) | 28 |
-| [`tests/test_end_to_end.py`](../tests/test_end_to_end.py) | 17 |
+| [`tests/test_end_to_end.py`](../tests/test_end_to_end.py) | 26 |
 | [`tests/test_security_p0.py`](../tests/test_security_p0.py) | 44 |
 | [`tests/test_support_claims.py`](../tests/test_support_claims.py) | 10 |
 | [`tests/test_documented_messages.py`](../tests/test_documented_messages.py) | 3 |
@@ -34,7 +34,7 @@ higher.
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 9 |
 | [`tests/test_release_evidence.py`](../tests/test_release_evidence.py) | 19 |
 | [`tests/test_publish_release.py`](../tests/test_publish_release.py) | 16 |
-| **Total** | **511** |
+| **Total** | **520** |
 
 ---
 
@@ -542,7 +542,7 @@ Shipped directive integrity. A directive naming a tool that no longer exists par
 
 Full runs through the real CLI against a stub model server. Only inference is stubbed; orchestrator, executor, guards, tools and audit are real.
 
-17 tests.
+26 tests.
 
 - **tool catalog happy path runs to completion** — Full pipeline: load directive -> load+validate policies -> LLM turn ->
 - **policy and tool list reach the system prompt** — Regression guard for a silent governance failure: if policy rule text or
@@ -563,6 +563,15 @@ Full runs through the real CLI against a stub model server. Only inference is st
 - **malformed non json model output fails cleanly** — A model turn that isn't JSON at all — no tool call, no completion — must be
 - **backend selection uses openai compatible stub with configured model** — Confirm the run actually goes through the OpenAI-compatible backend
 - **invalid tool arguments are rejected by schema validation** — A third validation layer, distinct from directive scope (tier 1) and
+- **refusal shape is offered to the model** — The contract must OFFER the refusal, not merely accept it.
+- **model refusal is a terminal state not a parse error** — The whole point of the variant: a refusal is recorded as a decision.
+- **prose refusal is recovered by one format reminder** — The live 08-24 failure, end to end.
+- **refusal takes precedence over a completion in the same response** — A response carrying both keys has to resolve one way.
+- **a refusal is not downgraded to a parse error by the shape of its reason** — `refused: true` is the decision; the reason is presentational.
+- **refusal reason is scrubbed before it reaches the caller or the audit log** — The reason is model text on a path no guard has scanned.
+- **a truthy non boolean refused value is not a refusal** — `{"refused": "no"}` is the model saying it is NOT declining.
+- **a truthy non boolean done value is not a completion** — `{"done": "no", "tool": ...}` is the model saying it is NOT finished.
+- **an unusable refusal shape is recorded rather than reported as something else** — `refused` present but unreadable as a bool.
 
 ---
 

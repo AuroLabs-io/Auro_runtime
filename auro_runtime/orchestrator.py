@@ -24,6 +24,7 @@ from auro_runtime.sanitization import (
 from auro_runtime.schemas import (
     CompletionOutput,
     DirectiveMetadata,
+    RefusalOutput,
     RouterDecision,
     RunMessage,
     RunResult,
@@ -52,6 +53,16 @@ def _redacted(value):
 def _scrub(text: str) -> str:
     """Remove secret-shaped substrings from free text, keeping the rest readable."""
     return scrub_text(text)
+
+
+class _NotACompletion(Exception):
+    """
+    Raised when a response carries `done` but the validated value is false.
+
+    It rejoins the existing shape-rejected path rather than returning, so a
+    response that merely says "not done" falls through to tool-call parsing —
+    which is what a model sending `{"done": false, "tool": ...}` is asking for.
+    """
 
 
 def _safe_error(exc) -> str:
@@ -180,7 +191,25 @@ If you need to call a tool, respond with:
 If the task is complete and you have nothing left to do, respond with:
 {"done": true, "summary": "<final summary or result for the user>"}
 
+If you will not carry out the request — because the policies above forbid it,
+or for any other reason — respond with:
+{"refused": true, "reason": "<why you are declining>"}
+
+Declining is a supported outcome and this is how you do it. Do not explain a
+refusal in prose outside the JSON object: prose cannot be read as a response,
+and the run ends as a parse error instead of as your decision.
+
 You may only use tools that are listed in the directive. One tool call per message.
+"""
+
+
+FORMAT_REMINDER = """
+
+Your previous response was not a single JSON object, so it could not be read.
+Reply with exactly one JSON object and no other text: a tool call, or
+{"done": true, "summary": "..."}, or {"refused": true, "reason": "..."}.
+If you were declining, use the refusal shape — it is a supported outcome, and
+declining in prose ends the run as a parse error rather than as your decision.
 """
 
 
@@ -860,13 +889,20 @@ Allowed tools for this directive: {', '.join(sorted(allowed_tools))}.
 
     user_message = user_request
 
-    for step in range(max_steps):
-        set_audit_step(step)
+    def _model_turn(prompt_message: str, step: int):
+        """
+        Take one model turn, or end the run.
+
+        Returns `(response_text, None)` normally and `(None, result_dict)` when
+        the backend raised. Extracted because the format reminder below needs a
+        second turn on identical terms, and a duplicated failure path is two
+        places for the same backend error to be reported differently.
+        """
         try:
-            response_text = generate(
+            return generate(
                 system_prompt=system_prompt,
-                user_message=_scrub(user_message),
-            )
+                user_message=_scrub(prompt_message),
+            ), None
         except Exception as e:
             safe_error = _safe_error(e)
             logger.warning(
@@ -891,7 +927,7 @@ Allowed tools for this directive: {', '.join(sorted(allowed_tools))}.
                     timestamp=None,
                 )
             )
-            return RunResult(
+            return None, RunResult(
                 success=False,
                 messages=messages,
                 final_summary=None,
@@ -904,7 +940,39 @@ Allowed tools for this directive: {', '.join(sorted(allowed_tools))}.
                 },
                 legacy_steps=steps,
             ).model_dump()
+
+    for step in range(max_steps):
+        set_audit_step(step)
+        response_text, backend_failure = _model_turn(user_message, step)
+        if backend_failure is not None:
+            return backend_failure
         data = _extract_json(response_text)
+        if not data:
+            # One reminder, then fail as before. A model declining in prose is
+            # following its policy and failing the format, so re-stating the
+            # envelope — including the refusal shape — gives it a way to say the
+            # same thing in contract. What this deliberately does NOT do is read
+            # the prose to decide whether it was a refusal: that would make a
+            # heuristic load-bearing on a security-relevant outcome, which is
+            # the wrong layer for this fix.
+            logger.info(
+                "response_format_reminded: directive_id=%s",
+                public_directive_id,
+                extra={"directive_id": public_directive_id},
+            )
+            write_audit_event(
+                "response_format_reminded",
+                directive_id=directive_id,
+                response_length=(
+                    len(response_text)
+                    if isinstance(response_text, (str, bytes, list, tuple, dict))
+                    else None
+                ),
+            )
+            response_text, backend_failure = _model_turn(user_message + FORMAT_REMINDER, step)
+            if backend_failure is not None:
+                return backend_failure
+            data = _extract_json(response_text)
         if not data:
             safe_preview = _redacted(
                 response_text[:500]
@@ -955,9 +1023,102 @@ Allowed tools for this directive: {', '.join(sorted(allowed_tools))}.
             )
             return result_model.model_dump()
 
-        if data.get("done"):
+        if "refused" in data:
+            # Checked before `done`, because a response carrying both keys has
+            # to resolve one way and the two mistakes are not symmetric: reading
+            # a refusal as a completion hides a decision an operator needs to
+            # see, while reading a completion as a refusal only understates a
+            # result the transcript still carries.
+            try:
+                refusal = RefusalOutput.model_validate(data)
+            except Exception as refusal_error:
+                # Do not swallow this, for the same reason the completion branch
+                # below does not: falling through to tool-call parsing would
+                # fail on a missing `tool` field and report an invalid tool call
+                # shape, pointing at entirely the wrong problem.
+                safe_data = _redacted(data)
+                safe_error = _safe_error(refusal_error)
+                logger.warning(
+                    "refusal_shape_rejected: error=%s response=%s",
+                    safe_error,
+                    safe_data,
+                    extra={"directive_id": public_directive_id, "response_data": safe_data},
+                )
+                write_audit_event(
+                    "refusal_shape_rejected",
+                    **sanitize_fields_with_report(
+                        directive_id=directive_id,
+                        error=refusal_error,
+                        response_data=data,
+                    ),
+                )
+            else:
+                # The reason is the model's own text on a path no guard has
+                # scanned — guards inspect tool-call arguments and reasons, not
+                # the words a model uses to decline — so it is scrubbed before
+                # it reaches the audit log, the transcript or the caller.
+                # A validated `refused: false` is not a refusal, whatever the
+                # raw value looked like: falling through lets the rest of the
+                # response say what it is.
+                if refusal.refused:
+                    safe_reason = _scrub(refusal.reason)
+                    stated_reason = safe_reason or "The model declined to proceed, without stating a reason."
+                    logger.info(
+                        "model_refused: directive_id=%s reason=%s",
+                        public_directive_id,
+                        safe_reason,
+                        extra={"directive_id": public_directive_id},
+                    )
+                    write_audit_event(
+                        "model_refused",
+                        directive_id=directive_id,
+                        reason=safe_reason,
+                    )
+                    messages.append(
+                        RunMessage(
+                            role="assistant",
+                            content=stated_reason,
+                            tool_call=None,
+                            tool_result=None,
+                            step_index=step,
+                            timestamp=None,
+                        )
+                    )
+                    # The valence of this empty case, stated rather than implied:
+                    # `success` is False because the run produced no result, and
+                    # `error` stays None because nothing failed. A refusal is the
+                    # system working. An operator scanning for faults must not find
+                    # this; an operator scanning for unfinished work must.
+                    # `final_summary` carries the reason because it is the model's
+                    # final word to the user, and because leaving both it and
+                    # `error` empty would print nothing at all on the CLI's
+                    # non-JSON path while still exiting non-zero.
+                    result_model = RunResult(
+                        success=False,
+                        messages=messages,
+                        final_summary=stated_reason,
+                        error=None,
+                        meta={
+                            "directive_id": public_directive_id,
+                            "max_steps": max_steps,
+                            "steps_count": len(steps),
+                            "event": "model_refused",
+                            "refusal_reason": safe_reason,
+                            "policy_profile": policy_profile,
+                            "unguarded_mode": unguarded_mode,
+                        },
+                        legacy_steps=steps,
+                    )
+                    return result_model.model_dump()
+
+        if "done" in data:
             try:
                 completion = CompletionOutput.model_validate(data)
+                if not completion.done:
+                    # A validated `done: false` is not a completion. Fall
+                    # through to tool-call parsing, which is what the model
+                    # that sent it was asking for.
+                    raise _NotACompletion
                 # The completion summary is the model's own text on the success
                 # path, so no guard has scanned it: guards inspect tool-call args
                 # and reasons, not the final answer. A model that has seen a
@@ -990,6 +1151,8 @@ Allowed tools for this directive: {', '.join(sorted(allowed_tools))}.
                     legacy_steps=steps,
                 )
                 return result_model.model_dump()
+            except _NotACompletion:
+                pass
             except Exception as completion_error:
                 # Do not swallow this. The model signalled `done`, so falling
                 # through to tool-call parsing will fail on a missing `tool`
@@ -1122,7 +1285,7 @@ Allowed tools for this directive: {', '.join(sorted(allowed_tools))}.
         next_user += (
             f"Result: {json.dumps(safe_result) if safe_result is not None else safe_result_error}\n\n"
         )
-        next_user += "What do you do next? Respond with one JSON object (tool call or done)."
+        next_user += "What do you do next? Respond with one JSON object (tool call, done, or refused)."
         user_message = next_user
 
     logger.warning(

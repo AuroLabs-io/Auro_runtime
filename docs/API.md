@@ -32,7 +32,7 @@ Both return the same dict:
 
 | Key | Type | Meaning |
 |---|---|---|
-| `success` | `bool` | Overall outcome |
+| `success` | `bool` | Overall outcome. `False` also covers a run the model declined — see `RefusalOutput` under [Types](#types), where `error` is `None` |
 | `messages` | `list[dict]` | Ordered transcript: `role`, `content`, `tool_call`, `tool_result`, `step_index`, `timestamp` |
 | `final_summary` | `str \| None` | Closing summary, when the run produced one |
 | `error` | `str \| None` | Set when the run failed |
@@ -161,6 +161,31 @@ run_history: list[dict] = []                     # you own this; append after ea
 | `tool` | `str` | yes |
 | `args` | `dict[str, Any]` | no, `{}` |
 | `reason` | `str` | no, `""` |
+
+**`CompletionOutput`** — the model's completion shape, the second thing it may emit.
+
+| Field | Type | Required |
+|---|---|---|
+| `done` | `bool` | yes, always `true` |
+| `summary` | `str` | no, `""` — a non-string value is rendered to text rather than rejected |
+
+**`RefusalOutput`** — the model's refusal shape, the third and last thing it may emit.
+
+| Field | Type | Required |
+|---|---|---|
+| `refused` | `bool` | yes, always `true` |
+| `reason` | `str` | no, `""` — a non-string value is rendered to text rather than rejected |
+
+A refusal is a terminal outcome of the run, not an error: `success` is `False`
+because no result was produced, `error` is `None` because nothing failed, and
+`meta["event"]` is `model_refused` with the stated reason in both
+`final_summary` and `meta["refusal_reason"]`. A response carrying both `refused`
+and `done` is read as a refusal.
+
+When a response cannot be parsed at all, the runtime re-states the response
+format once — naming the refusal shape — and parses the reply before giving up
+with `parse_json_failed`. The reminder is recorded as `response_format_reminded`.
+It never inspects unparseable prose to decide whether it was a refusal.
 
 **`ToolCallResult`** — what `execute()` returns.
 
@@ -333,7 +358,7 @@ With `AURO_ALLOW_NO_POLICIES=1` and zero enforceable rules, the run proceeds wit
 - `custom` verifies nothing, including on the shipped rules the operator kept. Guards still run; they are no longer checked to be the reviewed ones.
 - An unguarded run skips the profile check entirely: `AURO_POLICY_PROFILE` is never read on that path, so an invalid value does not refuse there.
 - A policies directory that does not exist is refused whatever `AURO_ALLOW_NO_POLICIES` says, because `load_policies()` returns `[]` for both a missing and an empty directory — without a separate path check a typo would become an unguarded run rather than a refusal.
-- `meta["policy_profile"]` and `meta["unguarded_mode"]` are set on a completed run only. A run that fails or reaches `max_steps` does not report which profile it used.
+- `meta["policy_profile"]` and `meta["unguarded_mode"]` are set on a run the model itself ended — a completion or a refusal. A run that fails or reaches `max_steps` does not report which profile it used.
 
 ### Secrets
 

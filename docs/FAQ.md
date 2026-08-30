@@ -49,7 +49,7 @@ If you need a durable or tamper-evident trail, treat `write_audit_records()` tog
 
 ### What are the performance limits — timeouts, retries, concurrency?
 
-The runtime bounds the number of steps per run (default 20, clamped to 50 when driven over MCP). Model calls are not counted separately — the step cap is what bounds them: the loop makes exactly one model call per step and stops on the first backend error, and the natural-language path adds one router call before the loop, so a default run makes at most 21 model calls and an MCP run at most 51. It does not provide, and you must supply if you need them:
+The runtime bounds the number of steps per run (default 20, clamped to 50 when driven over MCP). Model calls are not counted separately — the step cap is what bounds them: the loop makes at most two model calls per step — one for the step, plus at most one more that re-states the response format when the first reply cannot be parsed — and stops on the first backend error, and the natural-language path adds one router call before the loop, so a default run makes at most 41 model calls and an MCP run at most 101. It does not provide, and you must supply if you need them:
 
 - a model-call timeout on the Anthropic backend (the OpenAI-compatible backend uses a fixed 120-second timeout; the HTTP tool defaults to 30 seconds);
 - automatic retry or backoff — a model-backend error ends the run;

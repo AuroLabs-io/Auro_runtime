@@ -17,7 +17,8 @@ Use failure research (from a prior run of debug_research or provided by the user
 2. **Identify friction** — From the research summary, identify the main sources of friction. For example:
    - Repeated **argument_validation_failed** for a given tool → suggest tightening or documenting the args_schema or the directive's "Allowed tools" section.
    - **tool_not_allowed** → suggest adding the tool to the directive's `tools` list or fixing the directive.
-   - **parse_json_failed** or **invalid_tool_call_shape** → suggest clarifying the directive's output-format instructions so the LLM emits valid JSON.
+   - **parse_json_failed** or **invalid_tool_call_shape** → suggest clarifying the directive's output-format instructions so the LLM emits valid JSON. A **response_format_reminded** immediately before one of these means the runtime already re-stated the format and the second reply was unreadable too.
+   - **model_refused** → the model declined the request and said why; this is the runtime working, not a fault. Report the reason and do not propose a fix unless the refusal looks wrong for the request.
    - **max_steps_reached** → suggest simplifying the workflow or increasing max_steps.
    - **tool_execution_error** or **tool_type_error** → suggest fixing the tool implementation or its schema.
 

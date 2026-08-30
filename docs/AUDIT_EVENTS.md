@@ -1,6 +1,6 @@
 # Audit event catalogue
 
-**28 event names** are emitted by the runtime.
+**31 event names** are emitted by the runtime.
 
 Generated from the `write_audit_event` call sites by
 `python -m tests.audit_catalogue`. Do not edit by hand.
@@ -30,6 +30,7 @@ a guard that approves returns `None` and writes nothing.
 | `invalid_tool_call_shape` | `auro_runtime/orchestrator.py` | `directive_id`, `error`, `response_data` |
 | `max_steps_reached` | `auro_runtime/orchestrator.py` | `directive_id`, `error`, `max_steps`, `steps_count` |
 | `model_backend_error` | `auro_runtime/orchestrator.py` | `directive_id`, `error` |
+| `model_refused` | `auro_runtime/orchestrator.py` | `directive_id`, `reason` |
 | `no_enforceable_policies` | `auro_runtime/orchestrator.py` | `directive_id`, `error`, `policies_dir` |
 | `parse_json_failed` | `auro_runtime/orchestrator.py` | `directive_id`, `error`, `response_length` |
 | `policies_dir_missing` | `auro_runtime/orchestrator.py` | `directive_id`, `error`, `policies_dir` |
@@ -37,7 +38,9 @@ a guard that approves returns `None` and writes nothing.
 | `policy_guard_error` | `auro_runtime/executor.py` | `directive_id`, `error`, `guard`, `on_error`, `rule_id`, `tool` |
 | `policy_guard_missing` | `auro_runtime/executor.py` | `directive_id`, `error`, `guard`, `on_error`, `rule_id`, `tool` |
 | `policy_validation_failed` | `auro_runtime/orchestrator.py` | `directive_id`, `error` |
+| `refusal_shape_rejected` | `auro_runtime/orchestrator.py` | `directive_id`, `error`, `response_data` |
 | `resource_classification` | `auro_runtime/resource_plan.py` | `category`, `directive_id`, `origin`, `outcome`, `role`, `subjects`, `tool` |
+| `response_format_reminded` | `auro_runtime/orchestrator.py` | `directive_id`, `response_length` |
 | `router_backend_error` | `auro_runtime/orchestrator.py` | `error` |
 | `tool_execution_error` | `auro_runtime/executor.py` | `args`, `directive_id`, `error`, `reason`, `tool` |
 | `tool_not_allowed` | `auro_runtime/executor.py` | `allowed_tools`, `directive_id`, `error`, `reason`, `tool` |
@@ -83,10 +86,13 @@ Model-loop and directive-resolution failures.
 - `invalid_tool_call_shape`
 - `max_steps_reached`
 - `model_backend_error`
+- `model_refused`
 - `no_enforceable_policies`
 - `parse_json_failed`
 - `policies_dir_missing`
 - `policy_validation_failed`
+- `refusal_shape_rejected`
+- `response_format_reminded`
 - `router_backend_error`
 - `unguarded_mode_enabled`
 

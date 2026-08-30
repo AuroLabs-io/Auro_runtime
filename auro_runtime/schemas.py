@@ -109,6 +109,32 @@ class ToolCallResult(BaseModel):
     error: str | None = Field(default=None, description="Error message if success is False")
 
 
+def _coerce_model_text(v):
+    """
+    Render whatever the model put in a presentational text field as a string.
+
+    Shared by `CompletionOutput.summary` and `RefusalOutput.reason` because the
+    argument is the same in both: the signal is the `done` / `refused` key, and
+    the text beside it explains rather than decides. Two copies of this coercion
+    would be two chances for a terminal state to be downgraded differently.
+    """
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, (list, tuple)):
+        parts = []
+        for item in v:
+            if isinstance(item, str):
+                parts.append(item)
+            else:
+                parts.append(json.dumps(item, default=str))
+        return "\n".join(parts)
+    if isinstance(v, dict):
+        return json.dumps(v, default=str)
+    return str(v)
+
+
 class CompletionOutput(BaseModel):
     """When the LLM is done (no more tool calls), it returns this shape."""
 
@@ -127,21 +153,36 @@ class CompletionOutput(BaseModel):
         and — because the caller then tries to parse it as a tool call — reports
         a misleading "invalid tool call shape" error.
         """
-        if v is None:
-            return ""
-        if isinstance(v, str):
-            return v
-        if isinstance(v, (list, tuple)):
-            parts = []
-            for item in v:
-                if isinstance(item, str):
-                    parts.append(item)
-                else:
-                    parts.append(json.dumps(item, default=str))
-            return "\n".join(parts)
-        if isinstance(v, dict):
-            return json.dumps(v, default=str)
-        return str(v)
+        return _coerce_model_text(v)
+
+
+class RefusalOutput(BaseModel):
+    """
+    When the LLM declines to proceed, it returns this shape.
+
+    A refusal is a legitimate terminal state of a run. Before this variant
+    existed the envelope offered only a tool call and a completion, so a model
+    that declined — most often by correctly following the policy text in its own
+    prompt — could only do so in prose, which is not JSON, and the run died as
+    `parse_json_failed`. Correct behaviour and malformed output were the same
+    event, and the better a model followed its policy text the more often it
+    crashed the run.
+    """
+
+    refused: bool = Field(True, description="Always true when the model declines to proceed")
+    reason: str = Field(default="", description="The model's stated reason for declining")
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def _coerce_reason(cls, v):
+        """
+        Accept a non-string reason, for the same reason `summary` does.
+
+        `refused: true` is the decision; the reason explains it. Rejecting a
+        refusal over the shape of its explanation would report it as a parse
+        failure — precisely the defect this variant exists to remove.
+        """
+        return _coerce_model_text(v)
 
 
 # --- Orchestrator run() result: chat-style schema ---

@@ -17,7 +17,7 @@ Analyze the structured audit log of system failures (from the orchestrator and e
 2. **Read and parse** — Use `read_file` to load the audit file. The format is JSONL: one JSON object per line. Each line has at least: `timestamp`, `event`, and often `tool`, `directive_id`, `error`, and other fields (e.g. `validation_error`, `allowed_tools`, `args`). Parse each line with JSON; skip or note any malformed lines.
 
 3. **Aggregate** — Group events by:
-   - **Event type** (e.g. `argument_validation_failed`, `tool_not_allowed`, `tool_execution_error`, `tool_type_error`, `parse_json_failed`, `invalid_tool_call_shape`, `max_steps_reached`).
+   - **Event type** (e.g. `argument_validation_failed`, `tool_not_allowed`, `tool_execution_error`, `tool_type_error`, `parse_json_failed`, `invalid_tool_call_shape`, `max_steps_reached`, `model_refused`, `response_format_reminded`).
    - **Tool** (when the event has a `tool` field).
    - **Directive** (when the event has a `directive_id` field).
 

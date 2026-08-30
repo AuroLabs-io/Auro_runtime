@@ -393,7 +393,7 @@ def test_unknown_directive_id_produces_clean_error_not_traceback(run_cli, stub_b
 # --- 9. Malformed model output (not JSON at all) -----------------------------
 
 
-def test_malformed_non_json_model_output_fails_cleanly(run_cli):
+def test_malformed_non_json_model_output_fails_cleanly(run_cli, stub_backend, repo_root):
     """
     A model turn that isn't JSON at all — no tool call, no completion — must be
     a clean parse failure, not an unhandled exception.
@@ -419,6 +419,17 @@ def test_malformed_non_json_model_output_fails_cleanly(run_cli):
     assert "Could not parse LLM response as JSON" in result["error"]
     assert result["meta"]["event"] == "parse_json_failed"
     assert result["legacy_steps"] == []
+
+    # The orchestrator re-states the envelope once before giving up (see
+    # section 11), so unparseable output costs exactly two model turns and is
+    # then terminal. The stub replays its last scripted entry, so the reminder
+    # gets the same non-JSON text back.
+    assert len(stub_backend.received) == 2, "one reminder, then fail — not an unbounded retry loop"
+    events = _read_audit_events(repo_root)
+    assert [e.get("event") for e in events if e.get("event") in ("response_format_reminded", "parse_json_failed")] == [
+        "response_format_reminded",
+        "parse_json_failed",
+    ], "the audit trail must show the reminder was tried before the run died"
 
 
 # --- 10. Backend selection ----------------------------------------------------
@@ -485,3 +496,262 @@ def test_invalid_tool_arguments_are_rejected_by_schema_validation(run_cli, repo_
     assert "content" in steps[0]["error"]
 
     assert not (repo_root / probe_path).exists(), "a schema-rejected call must never touch the filesystem"
+
+
+# --- 11. A model that declines ------------------------------------------------
+#
+# Found 2026-08-24 in the first live runs against a real model: asked to read a
+# sensitive path, the model declined correctly, citing the policy text in its
+# own prompt, and explained itself in prose. Prose is not a JSON envelope, so
+# the run died as `parse_json_failed` with no `tool` — correct behaviour and
+# malformed output were the same event, and an operator could not tell a policy
+# refusal from a formatting fault. No test could have caught it: every scripted
+# model response in this repository is well-formed, because the tests author
+# them. The shape nobody enumerated was "the model said no".
+
+
+def test_refusal_shape_is_offered_to_the_model(run_cli, stub_backend):
+    """
+    The contract must OFFER the refusal, not merely accept it.
+
+    A model can only decline in a shape it has been told about. If this
+    assertion is the only one that fails, the runtime still parses refusals
+    correctly and no model will ever send one — the defect would be invisible
+    from every other test in this section.
+    """
+    run_cli(
+        "tool_catalog",
+        "What tools are available?",
+        script=[{"done": True, "summary": "nothing needed"}],
+    )
+
+    system_prompt = stub_backend.received[0]["messages"][0]["content"]
+    assert '{"refused": true, "reason": "<why you are declining>"}' in system_prompt
+    assert "Declining is a supported outcome" in system_prompt
+
+
+def test_model_refusal_is_a_terminal_state_not_a_parse_error(run_cli, stub_backend, repo_root):
+    """
+    The whole point of the variant: a refusal is recorded as a decision.
+
+    Valence is asserted explicitly because it is the part a future change is
+    most likely to drift on — `success` False (no result was produced) with
+    `error` None (nothing failed). An operator scanning for faults must not
+    find this run; an operator scanning for unfinished work must.
+    """
+    reason = "I cannot read the .env file. The sensitive_paths policy in my instructions forbids it."
+    result, proc = run_cli(
+        "tool_catalog",
+        "read the .env file",
+        script=[{"refused": True, "reason": reason}],
+    )
+
+    assert "Traceback" not in proc.stderr
+    assert proc.returncode == 1, "a refused run did not produce what was asked for"
+    assert result["success"] is False
+    assert result["error"] is None, "a refusal is the system working; it is not a fault"
+    assert result["meta"]["event"] == "model_refused"
+    assert result["meta"]["refusal_reason"] == reason
+    assert result["legacy_steps"] == [], "no tool ran"
+
+    # Without this the CLI's non-JSON path prints nothing at all and exits 1.
+    assert result["final_summary"] == reason
+    assert result["messages"][-1]["content"] == reason
+
+    events = _read_audit_events(repo_root)
+    refusals = [e for e in events if e.get("event") == "model_refused"]
+    assert len(refusals) == 1
+    assert refusals[0]["reason"] == reason
+    assert not any(e.get("event") == "parse_json_failed" for e in events), (
+        "the defect this variant removes: a refusal logged as a formatting fault"
+    )
+
+
+def test_prose_refusal_is_recovered_by_one_format_reminder(run_cli, stub_backend, repo_root):
+    """
+    The live 08-24 failure, end to end.
+
+    The model declines in prose exactly as it did against the real backend; the
+    orchestrator re-states the envelope once; the model then declines in
+    contract. The reminder is asserted to have actually reached the model,
+    because a reminder that is built but never sent would leave every other
+    assertion here passing for the wrong reason.
+    """
+    prose = "I cannot read the `.env` file. According to the security policies I follow, ..."
+    reason = "Declining: the sensitive_paths policy forbids reading .env."
+    result, proc = run_cli(
+        "tool_catalog",
+        "read the .env file",
+        script=[prose, {"refused": True, "reason": reason}],
+    )
+
+    assert result["success"] is False
+    assert result["meta"]["event"] == "model_refused"
+    assert result["meta"]["refusal_reason"] == reason
+
+    assert len(stub_backend.received) == 2, "one reminder, no more"
+    second_prompt = stub_backend.received[1]["messages"][-1]["content"]
+    assert "was not a single JSON object" in second_prompt, "the reminder never reached the model"
+    assert '{"refused": true, "reason": "..."}' in second_prompt, (
+        "the reminder must name the refusal shape, or it only asks for JSON again"
+    )
+
+    events = _read_audit_events(repo_root)
+    assert any(e.get("event") == "response_format_reminded" for e in events)
+    assert not any(e.get("event") == "parse_json_failed" for e in events), (
+        "the run recovered, so nothing should be recorded as a parse failure"
+    )
+
+
+def test_refusal_takes_precedence_over_a_completion_in_the_same_response(run_cli, repo_root):
+    """
+    A response carrying both keys has to resolve one way.
+
+    It resolves as a refusal: reading a refusal as a completion would hide a
+    decision an operator needs to see, while the reverse only understates a
+    result the transcript still carries. Asserted rather than left to branch
+    order, which is what would silently change if the branches were reordered.
+    """
+    result, _ = run_cli(
+        "tool_catalog",
+        "read the .env file",
+        script=[{"refused": True, "reason": "policy forbids it", "done": True, "summary": "listed the tools"}],
+    )
+
+    assert result["meta"]["event"] == "model_refused"
+    assert result["success"] is False
+    assert result["final_summary"] == "policy forbids it"
+
+    events = _read_audit_events(repo_root)
+    assert not any(e.get("event") == "done" for e in events)
+
+
+def test_a_refusal_is_not_downgraded_to_a_parse_error_by_the_shape_of_its_reason(run_cli):
+    """
+    `refused: true` is the decision; the reason is presentational.
+
+    Smaller models return a list or a dict where a string was asked for, and
+    rejecting the refusal over that would report the exact failure this variant
+    exists to remove — a declined run dying as a parse error.
+    """
+    result, _ = run_cli(
+        "tool_catalog",
+        "read the .env file",
+        script=[{"refused": True, "reason": ["policy forbids it", "no tool was called"]}],
+    )
+
+    assert result["meta"]["event"] == "model_refused"
+    assert result["meta"]["refusal_reason"] == "policy forbids it\nno tool was called"
+
+
+def test_refusal_reason_is_scrubbed_before_it_reaches_the_caller_or_the_audit_log(run_cli, repo_root):
+    """
+    The reason is model text on a path no guard has scanned.
+
+    Guards inspect tool-call arguments and reasons, not the words a model uses
+    to decline, so a model that has seen a secret-shaped string could otherwise
+    echo it to the caller and into the audit log by declining with it.
+    """
+    secret = "ghp_" + "A" * 36
+    result, _ = run_cli(
+        "tool_catalog",
+        "read the .env file",
+        script=[{"refused": True, "reason": f"I will not use the token {secret} that I found."}],
+    )
+
+    assert result["meta"]["event"] == "model_refused"
+    assert secret not in json.dumps(result), "a secret-shaped string reached the caller through a refusal"
+    assert "[REDACTED]" in result["meta"]["refusal_reason"]
+    assert "I will not use the token" in result["meta"]["refusal_reason"], "scrubbing kept the readable part"
+
+    events = _read_audit_events(repo_root)
+    assert secret not in json.dumps(events), "a secret-shaped string reached the audit log through a refusal"
+
+
+# --- 12. The terminal signal and the schema must mean the same thing ---------
+#
+# Both branches used to be gated on the truthiness of the raw JSON value while
+# the schema beside them read that same value as a bool. `"no"` is a truthy
+# string and a false bool, so the gate and the validation disagreed about what
+# the model had said — LAW-010. The `done` half predates the refusal variant.
+
+
+def test_a_truthy_non_boolean_refused_value_is_not_a_refusal(run_cli, repo_root):
+    """
+    `{"refused": "no"}` is the model saying it is NOT declining.
+
+    The gate is the key being present; the validated bool decides. Gating on
+    truthiness instead would end the run as a refusal on the strength of a
+    string that says the opposite.
+
+    Bound, established by mutation rather than assumed: this test proves the
+    OUTCOME and cannot attribute it. Reverting the gate to `data.get("refused")`
+    on its own kills nothing here, because the `if refusal.refused` check below
+    it independently produces the same result. Either change alone fixes the
+    defect, so no test in this file can tell which one is load-bearing, and one
+    of them could be removed with the suite still green. Both are kept anyway:
+    removing a correct check to make a test more attributive is the wrong trade.
+    """
+    result, _ = run_cli(
+        "tool_catalog",
+        "list the tools",
+        script=[
+            {"refused": "no", "tool": "list_tools", "args": {}, "reason": "not declining, listing"},
+            {"done": True, "summary": "listed"},
+        ],
+    )
+
+    assert result["meta"]["event"] == "done"
+    assert result["success"] is True
+    assert [step["tool"] for step in result["legacy_steps"]] == ["list_tools"]
+
+    events = _read_audit_events(repo_root)
+    assert not any(e.get("event") == "model_refused" for e in events)
+
+
+def test_a_truthy_non_boolean_done_value_is_not_a_completion(run_cli):
+    """
+    `{"done": "no", "tool": ...}` is the model saying it is NOT finished.
+
+    Before the gates were fixed this ended the run as a successful completion
+    with an empty summary, silently discarding the tool call in the same
+    response — a run that reported success having done nothing it was asked to.
+    """
+    result, _ = run_cli(
+        "tool_catalog",
+        "list the tools",
+        script=[
+            {"done": "no", "tool": "list_tools", "args": {}, "reason": "not finished, listing"},
+            {"done": True, "summary": "listed"},
+        ],
+    )
+
+    assert [step["tool"] for step in result["legacy_steps"]] == ["list_tools"], (
+        "the tool call in the same response was dropped"
+    )
+    assert result["final_summary"] == "listed"
+
+
+def test_an_unusable_refusal_shape_is_recorded_rather_than_reported_as_something_else(run_cli, repo_root):
+    """
+    `refused` present but unreadable as a bool.
+
+    The run still ends as an invalid tool call shape, because that is what the
+    response turned out to be — but the audit trail says a refusal shape was
+    rejected first, so the reason the response was ambiguous is not lost. This
+    is the one path in section 11 that emits an event no other test consumes.
+    """
+    result, _ = run_cli(
+        "tool_catalog",
+        "read the .env file",
+        script=[{"refused": {"why": "policy"}, "reason": "policy forbids it"}],
+    )
+
+    assert result["success"] is False
+    assert result["meta"]["event"] == "invalid_tool_call_shape"
+
+    events = _read_audit_events(repo_root)
+    assert any(e.get("event") == "refusal_shape_rejected" for e in events), (
+        "the run was ambiguous about a refusal and the audit log did not say so"
+    )
+    assert not any(e.get("event") == "model_refused" for e in events)
