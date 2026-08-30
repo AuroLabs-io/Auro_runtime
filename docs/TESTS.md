@@ -1,6 +1,6 @@
 # Test catalogue
 
-**505 test functions** across 21 files.
+**509 test functions** across 21 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -21,7 +21,7 @@ higher.
 | [`tests/test_file_tool_contracts.py`](../tests/test_file_tool_contracts.py) | 75 |
 | [`tests/test_credentials.py`](../tests/test_credentials.py) | 49 |
 | [`tests/test_registry.py`](../tests/test_registry.py) | 29 |
-| [`tests/test_directives.py`](../tests/test_directives.py) | 23 |
+| [`tests/test_directives.py`](../tests/test_directives.py) | 27 |
 | [`tests/test_end_to_end.py`](../tests/test_end_to_end.py) | 17 |
 | [`tests/test_security_p0.py`](../tests/test_security_p0.py) | 44 |
 | [`tests/test_support_claims.py`](../tests/test_support_claims.py) | 10 |
@@ -34,7 +34,7 @@ higher.
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 9 |
 | [`tests/test_release_evidence.py`](../tests/test_release_evidence.py) | 19 |
 | [`tests/test_publish_release.py`](../tests/test_publish_release.py) | 16 |
-| **Total** | **505** |
+| **Total** | **509** |
 
 ---
 
@@ -370,7 +370,7 @@ The published contracts of the filesystem tools, one test per documented claim. 
 - **recursive still respects blocking for direct children**
 ### TestDocumentedRefusalText
 
-- **a write into a protected directory refuses and names it**
+- **a write into a protected directory refuses and names it** — The workspace is built here rather than borrowed from the checkout.
 - **a write outside the writable dirs refuses with the documented text** — The other refusal the README quotes, for a directory that is merely
 - **a delete inside a protected directory refuses and names it** — The probe is created directly rather than aimed at a real policy file.
 - **widening the writable dirs onto a protected one is refused** — `AURO_RUNTIME_WRITABLE_DIRS` cannot be used to open a protected path.
@@ -471,7 +471,7 @@ Tool registry shape, project-root and import wiring, the CLI surface, model-back
 ### TestProjectRootAndCoreImports
 
 - **get project root returns the repo root**
-- **project root contains expected marker dirs**
+- **project root contains expected marker dirs** — `directives/` and `policies/` are not among the markers any more.
 - **get registry returns a copy not the live dict** — get_registry()'s docstring promises a copy; mutating the result must not corrupt the real registry.
 - **core module imports cleanly**
 - **main entrypoint is callable**
@@ -500,7 +500,7 @@ Tool registry shape, project-root and import wiring, the CLI surface, model-back
 
 Shipped directive integrity. A directive naming a tool that no longer exists parses fine, ships fine, and fails only at execution.
 
-23 tests.
+27 tests.
 
 ### TestEmptyToolScopeFailsClosed
 
@@ -517,6 +517,12 @@ Shipped directive integrity. A directive naming a tool that no longer exists par
 - **no directive references pre rename paths** — The carve renamed auro/ -> auro_runtime/ and tools/ -> runtime_tools/. Stale
 - **list directives returns every file**
 - **validate directive passes for every shipped directive** — Run the project's own validator over its own content.
+### TestValidateDirectiveResolvesTheAuthorityMount
+
+- **the directives mount resolves to the packaged authority**
+- **an absolute path to packaged authority is accepted**
+- **an escape through or around the mount is refused** — Traversal is refused after resolution, not by inspecting the string.
+- **a sensitive name is still refused under the mount** — The mount must not become a way around the sensitive-file classifier.
 - **verifiers are not reachable from a directive** — The verifiers are operator functions and must stay unregistered.
 - **dynamic verifier fails when test phase is vacuous** — A missing runner or empty collection must never make the gate green.
 - **dynamic verifier copies test catalogue** — The temporary project must contain the generated file its tests validate.
@@ -576,7 +582,7 @@ Regression tests for the package-owned authority split: zero-policy refusal, wor
 - **explicit custom policy profile is not compared to shipped manifest** — Positive control: deliberate custom policy sets remain supported.
 - **project root does not trust an arbitrary working directory** — A CWD marker must not redirect policies, directives, or Python imports.
 - **invalid explicit root fails instead of falling back**
-- **packaged authority assets match reviewed source sets** — Positive content proof: wheel inputs cannot drift from reviewed files.
+- **packaged authority is the only authority tree** — The replacement for the byte-parity pin, which had two trees to compare.
 - **workspace override cannot redirect authority**
 - **legacy root cannot redirect authority** — AURO_ROOT may select legacy workspace state, never executable resources.
 - **workspace resolution is frozen for process**

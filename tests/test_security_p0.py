@@ -149,9 +149,12 @@ def test_an_existing_empty_policies_directory_still_honours_the_opt_in(
     assert result["final_summary"] == "explicitly unguarded"
 
 
-def _copy_shipped_policies(repo_root, dest):
+def _copy_shipped_policies(dest):
+    """Copy the packaged authority policies, which are the ones the runtime loads."""
+    from auro_runtime.paths import get_policies_dir
+
     dest.mkdir(exist_ok=True)
-    for path in (repo_root / "policies").glob("*.yaml"):
+    for path in get_policies_dir().glob("*.yaml"):
         (dest / path.name).write_bytes(path.read_bytes())
     return dest
 
@@ -167,7 +170,7 @@ def test_a_downgraded_shipped_rule_is_refused_at_runtime(monkeypatch, tmp_path, 
     from auro_runtime import orchestrator
 
     _audit_to_tmp(monkeypatch, tmp_path)
-    policies_dir = _copy_shipped_policies(repo_root, tmp_path / "downgraded")
+    policies_dir = _copy_shipped_policies(tmp_path / "downgraded")
     target = policies_dir / "default.yaml"
     text = target.read_text(encoding="utf-8")
     assert "enforcement: block" in text, "shipped default.yaml no longer has a blocking rule"
@@ -200,7 +203,7 @@ def test_an_intact_shipped_profile_still_passes(monkeypatch, tmp_path, repo_root
     from auro_runtime import orchestrator
 
     _audit_to_tmp(monkeypatch, tmp_path)
-    policies_dir = _copy_shipped_policies(repo_root, tmp_path / "intact")
+    policies_dir = _copy_shipped_policies(tmp_path / "intact")
     monkeypatch.delenv("AURO_POLICY_PROFILE", raising=False)
     monkeypatch.setattr(
         orchestrator,
@@ -228,7 +231,7 @@ def test_an_added_rule_does_not_cost_the_shipped_profile_check(
     from auro_runtime import orchestrator
 
     _audit_to_tmp(monkeypatch, tmp_path)
-    policies_dir = _copy_shipped_policies(repo_root, tmp_path / "extended")
+    policies_dir = _copy_shipped_policies(tmp_path / "extended")
     (policies_dir / "site_local.yaml").write_text(
         "id: site_local\n"
         "rules:\n"
@@ -265,7 +268,7 @@ def test_a_removed_rule_still_refuses_under_the_shipped_profile(
     from auro_runtime import orchestrator
 
     _audit_to_tmp(monkeypatch, tmp_path)
-    policies_dir = _copy_shipped_policies(repo_root, tmp_path / "reduced")
+    policies_dir = _copy_shipped_policies(tmp_path / "reduced")
     (policies_dir / "credential_proxy.yaml").unlink()
     monkeypatch.delenv("AURO_POLICY_PROFILE", raising=False)
 
@@ -287,12 +290,13 @@ def test_a_removed_rule_still_refuses_under_the_shipped_profile(
 def test_partial_shipped_policy_profile_is_refused(monkeypatch, tmp_path, repo_root):
     """One surviving rule must not masquerade as the complete shipped posture."""
     from auro_runtime import orchestrator
+    from auro_runtime.paths import get_policies_dir
 
     _audit_to_tmp(monkeypatch, tmp_path)
     policies_dir = tmp_path / "partial-policies"
     policies_dir.mkdir()
     (policies_dir / "credential_proxy.yaml").write_bytes(
-        (repo_root / "policies" / "credential_proxy.yaml").read_bytes()
+        (get_policies_dir() / "credential_proxy.yaml").read_bytes()
     )
     monkeypatch.delenv("AURO_POLICY_PROFILE", raising=False)
 
@@ -316,12 +320,13 @@ def test_explicit_custom_policy_profile_is_not_compared_to_shipped_manifest(
 ):
     """Positive control: deliberate custom policy sets remain supported."""
     from auro_runtime import orchestrator
+    from auro_runtime.paths import get_policies_dir
 
     _audit_to_tmp(monkeypatch, tmp_path)
     policies_dir = tmp_path / "custom-policies"
     policies_dir.mkdir()
     (policies_dir / "credential_proxy.yaml").write_bytes(
-        (repo_root / "policies" / "credential_proxy.yaml").read_bytes()
+        (get_policies_dir() / "credential_proxy.yaml").read_bytes()
     )
     monkeypatch.setenv("AURO_POLICY_PROFILE", "custom")
     monkeypatch.setattr(
@@ -367,20 +372,25 @@ def test_invalid_explicit_root_fails_instead_of_falling_back(monkeypatch, tmp_pa
         get_project_root()
 
 
-def test_packaged_authority_assets_match_reviewed_source_sets(repo_root):
-    """Positive content proof: wheel inputs cannot drift from reviewed files."""
-    packaged = repo_root / "auro_runtime" / "resources"
-    for name, pattern in (("directives", "*.md"), ("policies", "*.yaml")):
-        source_files = {
-            path.name: path.read_bytes()
-            for path in (repo_root / name).glob(pattern)
-        }
-        packaged_files = {
-            path.name: path.read_bytes()
-            for path in (packaged / name).glob(pattern)
-        }
-        assert source_files
-        assert packaged_files == source_files
+def test_packaged_authority_is_the_only_authority_tree(repo_root):
+    """The replacement for the byte-parity pin, which had two trees to compare.
+
+    That test held `directives/` and `policies/` byte-identical to the packaged
+    copies, which is what made the duplication safe rather than useful. With the
+    mirrors retired there is one tree, so drift between two is not a failure
+    mode any more -- and the thing worth asserting instead is that a mirror has
+    not quietly come back, because a second tree would be loaded by nobody and
+    reviewed as though it shipped.
+    """
+    from auro_runtime.paths import get_directives_dir, get_policies_dir
+
+    for name in ("directives", "policies"):
+        assert not (repo_root / name).exists(), (
+            f"a top-level {name}/ reappeared; authority lives in the package"
+        )
+
+    assert list(get_directives_dir().glob("*.md")), "packaged directives are empty"
+    assert list(get_policies_dir().glob("*.yaml")), "packaged policies are empty"
 
 
 def test_workspace_override_cannot_redirect_authority(monkeypatch, tmp_path, repo_root):

@@ -521,11 +521,17 @@ def test_wheel_contains_reviewed_authority_assets_and_record(
     expected = {
         *(
             f"auro_runtime/resources/directives/{path.name}"
-            for path in (built_distribution.source_copy / "directives").glob("*.md")
+            for path in (
+                built_distribution.source_copy
+                / "auro_runtime" / "resources" / "directives"
+            ).glob("*.md")
         ),
         *(
             f"auro_runtime/resources/policies/{path.name}"
-            for path in (built_distribution.source_copy / "policies").glob("*.yaml")
+            for path in (
+                built_distribution.source_copy
+                / "auro_runtime" / "resources" / "policies"
+            ).glob("*.yaml")
         ),
     }
     assert expected
@@ -659,7 +665,9 @@ def test_sdist_excludes_tests_and_builds_the_same_authority_set(
     expected_authority = {
         f"auro_runtime/resources/{directory}/{path.name}"
         for directory, pattern in (("directives", "*.md"), ("policies", "*.yaml"))
-        for path in (built_distribution.source_copy / directory).glob(pattern)
+        for path in (
+            built_distribution.source_copy / "auro_runtime" / "resources" / directory
+        ).glob(pattern)
     }
     with zipfile.ZipFile(wheels[0]) as archive:
         rebuilt_authority = {

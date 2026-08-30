@@ -3,7 +3,5 @@ include README.md
 include SECURITY.md
 include pyproject.toml
 recursive-include auro_runtime/resources *.md *.yaml
-recursive-include directives *.md
 recursive-include docs *.md
-recursive-include policies *.yaml
 prune tests

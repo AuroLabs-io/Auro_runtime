@@ -38,10 +38,12 @@ _EXPECTED_GUARD_NAMES = {
 }
 
 
-def _guard_names_used_in_policy_files(repo_root: Path) -> set[str]:
-    """Collect every `guard:` value across policies/*.yaml via a raw YAML parse."""
+def _guard_names_used_in_policy_files() -> set[str]:
+    """Collect every `guard:` value across the packaged policies via a raw YAML parse."""
+    from auro_runtime.paths import get_policies_dir
+
     used: set[str] = set()
-    for path in (repo_root / "policies").glob("*.yaml"):
+    for path in get_policies_dir().glob("*.yaml"):
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         for rule in data.get("rules", []):
             if isinstance(rule, dict) and rule.get("guard"):
@@ -64,15 +66,15 @@ class TestGuardRegistryShape:
 
 
 class TestGuardPolicyBinding:
-    def test_every_registered_guard_is_bound_by_some_policy_rule(self, repo_root, guard_registry):
+    def test_every_registered_guard_is_bound_by_some_policy_rule(self, guard_registry):
         """No orphans: a registered guard that no rule ever binds is dead protection."""
-        used = _guard_names_used_in_policy_files(repo_root)
+        used = _guard_names_used_in_policy_files()
         unbound = set(guard_registry) - used
         assert unbound == set(), f"registered guards never referenced by any policy rule: {sorted(unbound)}"
 
-    def test_every_guard_referenced_in_policy_files_is_registered(self, repo_root, guard_registry):
+    def test_every_guard_referenced_in_policy_files_is_registered(self, guard_registry):
         """Inverse direction: a typo'd or renamed guard name in YAML must resolve to something real."""
-        used = _guard_names_used_in_policy_files(repo_root)
+        used = _guard_names_used_in_policy_files()
         unknown = used - set(guard_registry)
         assert unknown == set(), f"policy files reference guards missing from the registry: {sorted(unknown)}"
 

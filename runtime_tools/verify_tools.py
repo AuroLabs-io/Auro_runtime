@@ -26,7 +26,11 @@ from pathlib import Path
 
 import yaml
 
-from auro_runtime.paths import get_source_checkout_root
+from auro_runtime.paths import (
+    get_directives_dir,
+    get_policies_dir,
+    get_source_checkout_root,
+)
 from auro_runtime.sensitive_paths import classify_text
 
 _PROJECT_ROOT = None
@@ -43,7 +47,7 @@ _PROJECT_ROOT = None
 # verify_code_dynamic, which nothing in CI calls. A test that reads a path
 # this list does not carry is invisible until someone runs the verifier by
 # hand. Nothing keeps the two in sync -- see the open thread on the class.
-_SOURCE_DIRS = ["auro_runtime", "runtime_tools", "directives", "policies", "tests", "docs", ".github"]
+_SOURCE_DIRS = ["auro_runtime", "runtime_tools", "tests", "docs", ".github"]
 
 # Currently identical to _SOURCE_DIRS, and kept separate because they answer
 # different questions: what a faithful copy needs, versus what a whole-tree
@@ -405,8 +409,23 @@ def verify_code_static() -> dict:
         errors.extend(syntax_errors)
 
     # 2. Directive frontmatter validation (YAML parse only, no imports)
-    directives_dir = _root() / "directives"
-    if directives_dir.exists():
+    #
+    # The subject is the packaged authority, which is what the runtime loads.
+    # Absence is a failure rather than a skip: an `if exists()` guard here would
+    # delete the check silently the moment the directory moved, which is exactly
+    # how this check would have vanished when the top-level mirrors were dropped.
+    directives_dir = get_directives_dir()
+    if not directives_dir.is_dir():
+        checks.append({
+            "name": "directive_frontmatter",
+            "passed": False,
+            "detail": f"packaged directives directory not found at {directives_dir}",
+        })
+        errors.append(_make_finding(
+            "error", "MISSING_DIRECTORY",
+            f"Packaged authority directives not found at {directives_dir}",
+        ))
+    else:
         bad_directives = []
         directive_count = 0
         for md_file in sorted(directives_dir.glob("*.md")):
@@ -469,8 +488,18 @@ def verify_code_static() -> dict:
             errors.extend(bad_directives)
 
     # 3. Policy YAML parse check (no imports, just YAML structure)
-    policies_dir = _root() / "policies"
-    if policies_dir.exists():
+    policies_dir = get_policies_dir()
+    if not policies_dir.is_dir():
+        checks.append({
+            "name": "policy_yaml_parse",
+            "passed": False,
+            "detail": f"packaged policies directory not found at {policies_dir}",
+        })
+        errors.append(_make_finding(
+            "error", "MISSING_DIRECTORY",
+            f"Packaged authority policies not found at {policies_dir}",
+        ))
+    else:
         bad_policies = []
         policy_count = 0
         for yaml_file in sorted(policies_dir.glob("*.yaml")):
@@ -502,12 +531,21 @@ def verify_code_static() -> dict:
 
     # 4. File layout check
     layout_issues = []
-    expected_dirs = {"auro_runtime", "runtime_tools", "directives", "policies"}
+    expected_dirs = {"auro_runtime", "runtime_tools"}
     for d in expected_dirs:
         if not (_root() / d).is_dir():
             layout_issues.append(_make_finding(
                 "error", "MISSING_DIRECTORY",
                 f"Expected directory '{d}/' not found",
+            ))
+
+    # Authority lives in the package, not at the top level, so the layout check
+    # asks the package for it rather than looking for a sibling directory.
+    for authority_dir in (get_directives_dir(), get_policies_dir()):
+        if not authority_dir.is_dir():
+            layout_issues.append(_make_finding(
+                "error", "MISSING_DIRECTORY",
+                f"Packaged authority directory '{authority_dir}' not found",
             ))
 
     if not (_root() / "runtime_tools" / "__init__.py").exists():
@@ -604,7 +642,8 @@ def verify_code_dynamic() -> dict:
                     "from auro_runtime.policy import load_policies, validate_policies; "
                     "from auro_runtime.guards import get_guard_registry; "
                     "from auro_runtime.executor import get_registry; "
-                    "policies = load_policies('policies'); "
+                    "from auro_runtime.paths import get_policies_dir; "
+                    "policies = load_policies(str(get_policies_dir())); "
                     "validate_policies(policies, get_guard_registry(), get_registry()); "
                     "print('OK')"
                 )],
@@ -801,7 +840,7 @@ def verify_security() -> dict:
         from auro_runtime.policy import load_policies, get_enforceable_rules
         from auro_runtime.guards import get_guard_registry
 
-        policies = load_policies(_root() / "policies")
+        policies = load_policies(get_policies_dir())
         enforceable = get_enforceable_rules(policies)
         guard_reg = get_guard_registry()
         missing_guards = [r.id for r in enforceable if r.guard not in guard_reg]

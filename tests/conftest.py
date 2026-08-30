@@ -60,11 +60,17 @@ def guard_registry() -> dict:
 
 
 @pytest.fixture(scope="session")
-def policies(repo_root: Path) -> list:
-    """All PolicyBinding objects loaded from the repo's policies/ directory."""
+def policies() -> list:
+    """Every PolicyBinding in the packaged authority policies.
+
+    This is the tree the runtime loads. The top-level `policies/` mirror was
+    retired because a suite asserting against a copy that never executes is
+    green about the wrong file.
+    """
+    from auro_runtime.paths import get_policies_dir
     from auro_runtime.policy import load_policies
 
-    return load_policies(str(repo_root / "policies"))
+    return load_policies(str(get_policies_dir()))
 
 
 @pytest.fixture(scope="session")

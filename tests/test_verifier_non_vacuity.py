@@ -24,6 +24,7 @@ import pytest
 
 import auro_runtime.executor as executor_mod
 import auro_runtime.policy as policy_mod
+from auro_runtime.paths import get_policies_dir
 import runtime_tools.verify_tools as vt
 
 
@@ -86,7 +87,7 @@ def test_guard_completeness_reports_non_zero_rules_and_guards(baseline):
 
     assert "0 enforceable rules" not in detail
     assert policy_mod.get_enforceable_rules(
-        policy_mod.load_policies(vt._root() / "policies")
+        policy_mod.load_policies(get_policies_dir())
     ), "no enforceable rules loaded"
 
 

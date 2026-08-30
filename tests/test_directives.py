@@ -75,8 +75,10 @@ class TestEmptyToolScopeFailsClosed:
 
 
 @pytest.fixture(scope="module")
-def directives_dir(repo_root):
-    return repo_root / "directives"
+def directives_dir():
+    from auro_runtime.paths import get_directives_dir
+
+    return get_directives_dir()
 
 
 @pytest.fixture(scope="module")
@@ -159,6 +161,69 @@ def test_validate_directive_passes_for_every_shipped_directive(directive_files, 
     for path in directive_files:
         result = validate_directive(f"directives/{path.name}")
         assert result.get("valid") is True, f"{path.name}: {result.get('errors')}"
+
+
+class TestValidateDirectiveResolvesTheAuthorityMount:
+    """`validate_directive` reads through the same mounts as `read_file`.
+
+    It used to resolve relative paths against the workspace alone. That agreed
+    with the documented `directives/x.md` spelling only while a top-level
+    mirror of the authority tree happened to sit inside the workspace; when the
+    mirrors were retired, every shipped directive became File not found through
+    the path the directives themselves instruct. These pin the resolution in
+    both directions, because a reader that accepts the mount must still refuse
+    an escape through it -- accepting more is the failure mode a permit-only
+    test cannot see.
+
+    Bound, measured rather than assumed: the refusal tests below do not pin the
+    explicit containment check. Removing it alone leaves all seven passing,
+    because `check_resource_plan` refuses an uncontained subject with the very
+    same sentence, so the two layers are indistinguishable from outside. Only
+    removing both makes five of these fail. They therefore prove that an escape
+    is refused, not which layer refuses it -- and the duplication is deliberate
+    depth, not an accident to be tidied away.
+    """
+
+    def test_the_directives_mount_resolves_to_the_packaged_authority(self, registry):
+        from auro_runtime.paths import get_directives_dir
+        from runtime_tools.validate_directive_tools import validate_directive
+
+        for path in sorted(get_directives_dir().glob("*.md")):
+            result = validate_directive(f"directives/{path.name}")
+            assert result.get("valid") is True, f"{path.name}: {result.get('errors')}"
+
+    def test_an_absolute_path_to_packaged_authority_is_accepted(self, registry):
+        from auro_runtime.paths import get_directives_dir
+        from runtime_tools.validate_directive_tools import validate_directive
+
+        target = get_directives_dir() / "tool_catalog.md"
+        assert validate_directive(str(target)).get("valid") is True
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "directives/../../../../Windows/System32/drivers/etc/hosts",
+            "../../Windows/System32/drivers/etc/hosts",
+            "C:/Windows/System32/drivers/etc/hosts",
+            "/etc/passwd",
+        ],
+    )
+    def test_an_escape_through_or_around_the_mount_is_refused(self, path, registry):
+        """Traversal is refused after resolution, not by inspecting the string."""
+        from runtime_tools.validate_directive_tools import validate_directive
+
+        result = validate_directive(path)
+        assert result.get("valid") is False
+        assert "outside the allowed project directory" in result["errors"][0]
+
+    def test_a_sensitive_name_is_still_refused_under_the_mount(self, registry):
+        """The mount must not become a way around the sensitive-file classifier."""
+        from runtime_tools.validate_directive_tools import validate_directive
+
+        for path in ("directives/.env.md", "output/.env.md"):
+            result = validate_directive(path)
+            assert result.get("valid") is False
+            assert "sensitive file" in result["errors"][0]
 
 
 # --- The verification directives specifically ---------------------------------

@@ -260,8 +260,19 @@ class TestProjectRootAndCoreImports:
         assert get_project_root().resolve() == repo_root.resolve()
 
     def test_project_root_contains_expected_marker_dirs(self, repo_root):
-        for marker in ("auro_runtime", "runtime_tools", "policies", "directives"):
+        """`directives/` and `policies/` are not among the markers any more.
+
+        They were retired as top-level mirrors; the executable copies live in
+        the package and are asserted below against the resolver that finds
+        them, not against a sibling path that happened to exist.
+        """
+        from auro_runtime.paths import get_directives_dir, get_policies_dir
+
+        for marker in ("auro_runtime", "runtime_tools"):
             assert (repo_root / marker).is_dir(), f"expected marker directory missing: {marker}"
+
+        for authority in (get_directives_dir(), get_policies_dir()):
+            assert authority.is_dir(), f"packaged authority missing: {authority}"
 
     def test_get_registry_returns_a_copy_not_the_live_dict(self, registry):
         """get_registry()'s docstring promises a copy; mutating the result must not corrupt the real registry."""

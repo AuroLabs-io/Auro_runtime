@@ -845,12 +845,30 @@ class TestDocumentedRefusalText:
     quietly false.
     """
 
-    def test_a_write_into_a_protected_directory_refuses_and_names_it(self, repo_root):
+    def test_a_write_into_a_protected_directory_refuses_and_names_it(
+        self, monkeypatch, tmp_path
+    ):
+        """The workspace is built here rather than borrowed from the checkout.
+
+        `directives/` and `policies/` no longer exist at the top level, so a
+        probe asserting that no file was created in a directory that cannot
+        exist proves nothing. Protection is decided on the path's own parts, so
+        a workspace that really does contain a `directives/` is the honest
+        subject: the write has somewhere it could have landed.
+        """
+        from runtime_tools import file_tools
+
+        workspace = tmp_path / "workspace"
+        (workspace / "directives").mkdir(parents=True)
+        monkeypatch.setattr(file_tools, "_BASE_DIR", workspace.resolve())
+
         result = write_file("directives/__auro_protected_write_probe__.md", "x")
 
         assert result["written"] is False
         assert "Path is in protected directory 'directives'. Cannot write." in result["error"]
-        assert not (repo_root / "directives" / "__auro_protected_write_probe__.md").exists()
+        assert not (
+            workspace / "directives" / "__auro_protected_write_probe__.md"
+        ).exists()
 
     def test_a_write_outside_the_writable_dirs_refuses_with_the_documented_text(
         self, repo_root
@@ -872,7 +890,9 @@ class TestDocumentedRefusalText:
         )
         assert not (repo_root / "docs" / "__auro_unwritable_dir_probe__.txt").exists()
 
-    def test_a_delete_inside_a_protected_directory_refuses_and_names_it(self, repo_root):
+    def test_a_delete_inside_a_protected_directory_refuses_and_names_it(
+        self, monkeypatch, tmp_path
+    ):
         """The probe is created directly rather than aimed at a real policy file.
 
         `delete_file` checks existence before it checks protection, so reaching
@@ -880,19 +900,22 @@ class TestDocumentedRefusalText:
         the test at a shipped policy would mean a permissive regression deletes
         one instead of failing.
         """
-        probe = repo_root / "policies" / "__auro_protected_delete_probe__.yaml"
-        probe.write_text("# disposable probe\n", encoding="utf-8")
-        try:
-            result = delete_file("policies/__auro_protected_delete_probe__.yaml")
+        from runtime_tools import file_tools
 
-            assert result["deleted"] is False
-            assert (
-                "Path is in protected directory 'policies'. Cannot delete."
-                in result["error"]
-            )
-            assert probe.exists(), "the probe was removed from a protected directory"
-        finally:
-            probe.unlink(missing_ok=True)
+        workspace = tmp_path / "workspace"
+        (workspace / "policies").mkdir(parents=True)
+        monkeypatch.setattr(file_tools, "_BASE_DIR", workspace.resolve())
+
+        probe = workspace / "policies" / "__auro_protected_delete_probe__.yaml"
+        probe.write_text("# disposable probe\n", encoding="utf-8")
+        result = delete_file("policies/__auro_protected_delete_probe__.yaml")
+
+        assert result["deleted"] is False
+        assert (
+            "Path is in protected directory 'policies'. Cannot delete."
+            in result["error"]
+        )
+        assert probe.exists(), "the probe was removed from a protected directory"
 
     def test_widening_the_writable_dirs_onto_a_protected_one_is_refused(self, monkeypatch):
         """`AURO_RUNTIME_WRITABLE_DIRS` cannot be used to open a protected path.

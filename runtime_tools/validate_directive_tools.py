@@ -2,11 +2,8 @@
 Validate a directive file: parse front matter, check structure, verify referenced tools exist.
 """
 
-from pathlib import Path
-
 from auro_runtime.directive import load_directive, DIRECTIVE_ID_RE
 from auro_runtime.executor import register, get_registry
-from auro_runtime.paths import get_project_root
 from auro_runtime.resource_plan import (
     SOURCE,
     ResourcePlan,
@@ -14,6 +11,7 @@ from auro_runtime.resource_plan import (
     check_resource_plan,
 )
 from auro_runtime.tool_schemas import ValidateDirectiveArgs
+from runtime_tools.file_tools import _path_under_base, _resolve_read_path
 
 _REQUIRED_SECTIONS = ["Purpose", "Steps"]
 
@@ -27,11 +25,20 @@ def validate_directive(path: str) -> dict:
     """
     Parse and validate a directive file. Returns errors/warnings without executing it.
     """
-    base = get_project_root().resolve()
-    p = (base / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()
-    try:
-        p.resolve().relative_to(base)
-    except ValueError:
+    # This tool reads a file, so it resolves the path the way the other reader
+    # does. `_resolve_read_path` returns the target together with the base it
+    # was resolved against: the workspace for an ordinary path, and the packaged
+    # authority for the reserved `directives/` and `policies/` mounts.
+    #
+    # It used to resolve against `get_project_root()` alone, which worked only
+    # because a top-level `directives/` mirror happened to sit inside the
+    # workspace. Once authority moved into the package and that mirror was
+    # retired, validating a shipped directive by the path the directives
+    # themselves document returned "File not found" -- two readers disagreeing
+    # about what `directives/x.md` means, which is LAW-010. The fix is to share
+    # the one resolver rather than teach this tool a second special case.
+    p, base = _resolve_read_path(path)
+    if not _path_under_base(p, base):
         return {"valid": False, "errors": ["Path is outside the allowed project directory."]}
 
     # This tool reads a file, so it classifies its resolved target like every

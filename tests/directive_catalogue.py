@@ -30,7 +30,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DIRECTIVES_DIR = REPO_ROOT / "directives"
+DIRECTIVES_DIR = REPO_ROOT / "auro_runtime" / "resources" / "directives"
 OUTPUT = REPO_ROOT / "docs" / "DIRECTIVES.md"
 
 # Rendering order. Categories are a closed set in schemas.DirectiveCategory; an
