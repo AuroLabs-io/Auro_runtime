@@ -548,9 +548,18 @@ def test_a_sandbox_run_that_passed_nothing_cannot_report_a_pass(tmp_path):
     recorded as `test_suite: passed`. That is the same vacuity this file's
     header states as a rule and applies to `secret_scan` and
     `guard_completeness` -- a count, not a boolean.
+
+    Runs against its own repository rather than the ambient one. The first
+    version used the real root and passed here while failing inside the release
+    gate's `git archive` export, which has no `.git`: the manifest refused
+    first, so `test_suite` never appeared and the assertion was reading a
+    result from a different code path. Skipping there would have been the
+    lesser fix -- the question is expressible anywhere, it just needs a tree of
+    its own.
     """
     from types import SimpleNamespace
 
+    root = _staged_repo(tmp_path)
     real_run = vt.subprocess.run
 
     def fake_run(cmd, *args, **kwargs):
@@ -560,7 +569,8 @@ def test_a_sandbox_run_that_passed_nothing_cannot_report_a_pass(tmp_path):
             return SimpleNamespace(returncode=0, stdout="2 skipped in 0.01s", stderr="")
         return SimpleNamespace(returncode=0, stdout="OK\n", stderr="")
 
-    with patch.object(vt.subprocess, "run", fake_run):
+    with patch.object(vt, "_root", lambda: root), \
+            patch.object(vt.subprocess, "run", fake_run):
         result = vt.verify_code_dynamic()
 
     assert result["passed"] is False
