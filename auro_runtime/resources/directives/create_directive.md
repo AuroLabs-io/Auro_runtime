@@ -93,17 +93,15 @@ If the directive involves any of the following, you MUST include a `## Notes` se
 - External API calls via `http_request`
 - Authentication requirements (API keys, tokens, OAuth)
 - Access to sensitive data or admin-only paths
-- LLM calls via `generate_text` that may incur cost
-- Webhook notifications via `send_notification`
 ---
 ## Phase 4 — Draft the directive
-Use `generate_text` to produce the full directive draft based on the design decisions above.
-The prompt to `generate_text` should include:
+Compose the full directive draft yourself, from the design decisions above. Everything the draft needs is already in front of you from Phases 1-3; there is nothing to ask a model for.
+The draft must include:
 - The confirmed goal statement
 - The id, description, category, and tool list
 - The numbered steps as designed with the user
 - Any security/requirements disclosures
-- The correct format (show it the structure from Phase 2)
+- The correct format (follow the structure you read in Phase 2)
 Present the full draft to the user. Ask:
 - Does the purpose section capture the intent correctly?
 - Do the steps match what you expected?
@@ -144,11 +142,9 @@ Do not write vague pass criteria like "output looks good." Write specific ones l
 Share the test cases with the user and ask for confirmation before running them. They may want to add cases or adjust the inputs.
 ---
 ## Phase 7 — Run test cases and evaluate
-Use `generate_text` to simulate running the directive against each test case. The prompt to `generate_text` should:
-1. Include the full directive text (purpose + steps + tool descriptions)
-2. Include the test case input
-3. Instruct the model to follow the directive steps exactly and produce the expected output format
-4. Ask it to note any step where it was uncertain or had to make an assumption
+Rehearse the directive yourself against each test case. Take the test case input, follow the numbered steps in order exactly as they are written rather than as you intended them, and produce the output the directive specifies. Record every point where the text left you a choice to make.
+**What this rehearsal establishes, and what it cannot.** You wrote these steps, so you carry the intent behind them. Where a step is ambiguous you will resolve it the way you meant it and record a pass, which means the rehearsal cannot detect ambiguity and a green result here is not evidence that the prose is clear to anyone else. What it does establish is everything else: a missing step, a step naming a tool the directive does not list, an output format that contradicts an earlier phase, a branch whose outcome is never stated, a step that cannot be performed with the tools in scope. Report those. Report the ambiguity question as untested, not as passed.
+The only thing that settles readability is a run by someone who was not the author -- an operator promoting the draft and running it, or a second reader taking it cold. Say so plainly rather than letting the test case results imply it.
 Run each test case separately. For each result, evaluate against the pass criteria defined in Phase 6:
 ```
 Test case N — [name]
@@ -166,7 +162,7 @@ Based on the test results and user feedback, identify the root cause of each fai
 - **Missing step** — the directive assumed something would happen that wasn't explicitly instructed. Fix: add the missing step.
 - **Wrong output format** — the output structure wasn't specified precisely enough. Fix: add an explicit output template or example to the relevant step.
 - **Scope creep** — the directive did something it shouldn't have. Fix: add an explicit constraint or add a failure case handler.
-Use `generate_text` to produce a revised draft targeting only the identified issues. Do not rewrite the whole directive unless the core design was wrong — surgical fixes preserve what's working.
+Revise the draft yourself, targeting only the identified issues. Do not rewrite the whole directive unless the core design was wrong — surgical fixes preserve what's working.
 Re-validate with `validate_directive` after every revision.
 Re-run only the test cases that failed (plus any new ones added to cover newly discovered edge cases). If a fix for one test case breaks another, that's a design conflict — surface it to the user and resolve it before saving.
 Repeat until:
@@ -185,6 +181,7 @@ After saving, echo back to the user:
 - What it does in one sentence
 - The test cases that were run and their results
 - Any open questions or known limitations
+- That the test cases were rehearsed by their author, and what that does not establish (see Phase 7)
 - Suggested next steps (e.g. "run this against a real input", "build a companion directive for X")
 ---
 ## Allowed tools
@@ -192,7 +189,6 @@ After saving, echo back to the user:
 - `list_tools` — List all registered tools with descriptions and argument signatures. Args: none. Use in Phase 1 and 3 to show available tools and cross-check tool names during validation failures.
 - `read_file` — Read file contents. Args: `path` (str), `encoding` (str, optional). Use in Phase 2 to inspect existing directives as format reference, and in Phase 9 to verify the saved file.
 - `list_dir` — List directory contents. Args: `path` (str), `recursive` (bool, optional). Use to navigate the directives folder or confirm file locations.
-- `generate_text` — Single-shot LLM call. Args: `prompt` (str), `model` (str, optional — haiku/sonnet/opus). Use in Phase 4 to draft the directive and in Phase 7 to simulate test case execution. Use haiku for drafts and test runs to keep cost low; escalate to sonnet if output quality is insufficient.
 - `validate_directive` — Parse and validate a directive without executing it. Args: `path` (str) or `content` (str). Use in Phase 5 after every draft or revision before running test cases or saving.
 - `write_file` — Write content to a file. Args: `path` (str), `content` (str). Use in Phase 9 to save the candidate to `drafts/directives/<id>.md`. Never write to `directives/`, `policies/`, `docs/`, `auro_runtime/`, or `runtime_tools/`.
 - `echo` — Echo a message back. Args: `message` (str). Use for confirmations and status updates between phases.
@@ -204,5 +200,5 @@ After saving, echo back to the user:
 - **Keep steps atomic.** Each step should do one thing. If a step feels like it's doing two things, split it. Compound steps are the most common source of executor confusion.
 - **Explain the why in steps, not just the what.** Steps that say "retrieve the file so we can inspect its structure before drafting" are more reliably executed than steps that just say "retrieve the file." The orchestrator has good judgment when given context.
 - **If the user wants to edit an existing directive** rather than create a new one, suggest the **edit_directive** directive.
-- **If `generate_text` produces poor output** during test simulation, try a more detailed prompt that includes the full directive text and explicit output format instructions before escalating the model tier.
+- **A rehearsal by the author is not a readability test.** Phase 7 can find a missing step, a tool that isn't in scope, or an output format that contradicts itself. It cannot find ambiguity, because you resolve it with intent the next reader will not have. Never report the test cases as having proven the directive unambiguous.
 - **Document known limitations** in `## Notes` before saving. A directive with documented limitations is safer than one that silently fails on edge cases the developer knew about.

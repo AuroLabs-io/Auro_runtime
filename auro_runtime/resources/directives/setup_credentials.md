@@ -44,7 +44,6 @@ Assume the user may have little coding experience.
 
 7. **Show them how to use it** — This is the step that makes the setup worth anything. Use `list_tools` to point at the alias parameters:
    - `http_request` takes `auth_alias` (and optional `auth_scheme`: Bearer, Basic, or Token). Example: `http_request(url="https://api.github.com/user", auth_alias="github_token")`.
-   - `send_notification` takes `webhook_url_alias`. Prefer it over `webhook_url` for Slack and Discord, because their webhook URLs contain the token in the path.
    - Explain the rule: **never put a raw token in `headers`.** A policy guard blocks it, and it would land in the transcript before the guard ever saw it.
 
 8. **Complete** — Respond with `{"done": true, "summary": "..."}`. The summary must list the aliases configured, name the storage they chose, state whether `resolve_secret` confirmed each alias resolves, and show one concrete example of calling a tool with the alias parameter.
