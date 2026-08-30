@@ -1,6 +1,6 @@
 # Test catalogue
 
-**534 test functions** across 21 files.
+**535 test functions** across 21 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -33,8 +33,8 @@ higher.
 | [`tests/test_archive_integrity.py`](../tests/test_archive_integrity.py) | 6 |
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 9 |
 | [`tests/test_release_evidence.py`](../tests/test_release_evidence.py) | 19 |
-| [`tests/test_publish_release.py`](../tests/test_publish_release.py) | 26 |
-| **Total** | **534** |
+| [`tests/test_publish_release.py`](../tests/test_publish_release.py) | 27 |
+| **Total** | **535** |
 
 ---
 
@@ -842,7 +842,7 @@ Pins the publication gate to one explicit Git commit and tree. A dirty checkout,
 
 Pins the upload gate to the evidence record that vouches for the files. An incomplete release, a candidate nobody asserted as publishable, an artifact whose bytes no longer match the record, or an untested file sitting beside the tested ones must each refuse the upload rather than publish it.
 
-26 tests.
+27 tests.
 
 ### TestTheGateLetsAGoodCandidateThrough
 
@@ -867,6 +867,7 @@ Pins the upload gate to the evidence record that vouches for the files. An incom
 - **an unknown repository is refused**
 - **the parser requires a repository** — No default means forgetting to choose cannot pick the irreversible one.
 - **the parser requires an expected commit** — The argument whose absence used to be a pass.
+- **the documented command satisfies the parser** — The README shows a command; this runs its arguments through the parser.
 - **the parser accepts the complete command** — The anchor: with all three supplied, nothing exits.
 ### TestTheGuardsAreLoadBearing
 

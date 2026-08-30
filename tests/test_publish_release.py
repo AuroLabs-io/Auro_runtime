@@ -231,6 +231,44 @@ class TestTheDestinationIsNeverImplicit:
                 ["--evidence-dir", "dist", "--repository", "testpypi"]
             )
 
+    def test_the_documented_command_satisfies_the_parser(self) -> None:
+        """The README shows a command; this runs its arguments through the parser.
+
+        A documented example is a claim about what works, and prose has no
+        failing event -- it drifts instead of breaking. This one drifted in
+        exactly that way: `--expected-commit` was added to the tool and the
+        example kept working without it, so the documented path was the one
+        that skipped the check. Parsing the example means the docs cannot go
+        stale in the direction that matters, because the parser's required set
+        and the example are now checked against each other.
+
+        It does not prove the command succeeds -- that needs a real candidate,
+        and the release gate is where that lives. It proves the documented
+        arguments are the ones this tool actually requires.
+        """
+        import re
+        import shlex
+
+        from publish_release import _parser
+
+        readme = Path(__file__).resolve().parents[1] / "README.md"
+        text = readme.read_text(encoding="utf-8").replace("\r\n", "\n")
+        blocks = re.findall(r"```bash\n(.*?)```", text, re.DOTALL)
+        documented = [block for block in blocks if "publish_release.py" in block]
+        assert len(documented) == 1, (
+            f"expected exactly one documented publish command, found {len(documented)}"
+        )
+
+        tokens = shlex.split(documented[0].replace("\\\n", " "))
+        assert tokens[:3] == ["python", "-B", "publish_release.py"], tokens[:3]
+        args = _parser().parse_args(tokens[3:])
+
+        assert args.expected_commit, "the documented command omits --expected-commit"
+        assert args.repository == "testpypi", (
+            "the documented rehearsal must name the test index, not the real one"
+        )
+        assert args.dry_run is True, "the documented command must be the rehearsal"
+
     def test_the_parser_accepts_the_complete_command(self) -> None:
         """The anchor: with all three supplied, nothing exits.
 
