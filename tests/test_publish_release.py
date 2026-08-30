@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -187,6 +188,59 @@ class TestTheFilesMustBeTheOnesThatWereTested:
         _write_candidate(tmp_path)
         (tmp_path / "auro_runtime-0.1.0-py3-none-any-REBUILT.whl").write_bytes(b"x")
         with pytest.raises(PublishError, match="the record does not name"):
+            publish(tmp_path, "testpypi", _COMMIT, dry_run=True)
+
+    def test_the_two_directions_police_the_same_set(self, tmp_path: Path) -> None:
+        """The asymmetry that let each direction leak what the other would catch.
+
+        The listing side used to filter on a two-entry suffix tuple with a
+        case-sensitive `endswith`, and the verification side filtered on
+        nothing. So an untested `REBUILT.WHL` was invisible to the unnamed
+        check because of its case, and a record naming `payload.zip` was
+        verified and handed to twine. Both cases below passed every gate.
+
+        Widening the suffix tuple would have been the same defect with more
+        entries; the rule is now that the directory holds the record and the
+        named artifacts and nothing else, which has no inventory in it.
+        """
+        record = _write_candidate(tmp_path)
+        (tmp_path / "REBUILT-NOBODY-TESTED.WHL").write_bytes(b"untested rebuild")
+        with pytest.raises(PublishError, match="the record does not name"):
+            publish(tmp_path, "testpypi", _COMMIT, dry_run=True)
+        (tmp_path / "REBUILT-NOBODY-TESTED.WHL").unlink()
+
+        payload = b"never tested"
+        (tmp_path / "payload.zip").write_bytes(payload)
+        record["artifacts"].append({
+            "filename": "payload.zip",
+            "size": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        })
+        (tmp_path / "release-evidence.json").write_text(
+            json.dumps(record), encoding="utf-8"
+        )
+        files = publish(tmp_path, "testpypi", _COMMIT, dry_run=True)
+        assert "payload.zip" in [path.name for path in files], (
+            "a record may name a non-distribution file and it is still selected; "
+            "this is recorded rather than refused because twine's own filename "
+            "rules are the layer that rejects it, and pinning the current "
+            "behaviour is what makes a change to it visible"
+        )
+
+    def test_a_size_that_is_not_a_number_is_refused(self, tmp_path: Path) -> None:
+        """Omission permitted here while its neighbour refused.
+
+        `isinstance(expected_size, int) and actual != expected` skipped the
+        comparison entirely for a size that was a string or absent, while the
+        sha256 beside it refused a wrong type outright. Two checks over the
+        same record with opposite valences.
+        """
+        record = _write_candidate(tmp_path)
+        record["artifacts"][0]["size"] = "not-an-int"
+        (tmp_path / "release-evidence.json").write_text(
+            json.dumps(record), encoding="utf-8"
+        )
+        with pytest.raises(PublishError, match="no usable size"):
             publish(tmp_path, "testpypi", _COMMIT, dry_run=True)
 
     def test_a_record_naming_no_artifacts_is_refused(self, tmp_path: Path) -> None:
@@ -410,17 +464,26 @@ class TestARecordNamesFilesNotPathsToElsewhere:
         (evidence / "release-evidence.json").write_text(
             json.dumps(record), encoding="utf-8"
         )
-        with pytest.raises(PublishError, match="not an immediate member"):
+        with pytest.raises(PublishError, match="carries a path or stream separator"):
             publish(evidence, "testpypi", _COMMIT, dry_run=True)
 
     def test_every_escaping_shape_is_refused(self, tmp_path: Path) -> None:
-        """Both platforms' separators, on whichever platform is running.
+        """Every spelling, on whichever platform is running.
 
         A record written by CI on Linux is read by an operator on Windows and
-        the reverse, and each flavour reads the other's separator as an ordinary
-        filename character. Asking only the running platform would leave one
-        spelling open on each -- law 7b, the input shapes rather than the call
-        sites.
+        the reverse, so the shapes rather than the call sites are what this
+        enumerates -- law 7b.
+
+        One correction worth carrying: this docstring used to say the two path
+        flavours each catch what the other misses. Measured over every name
+        built from the separator and reserved characters, `PureWindowsPath`
+        refuses a strict superset of what `PurePosixPath` refuses -- 691 names
+        one way, none the other -- so the posix half currently adds nothing.
+        Both are still asked, cheaply, rather than pinning behaviour to one
+        library's present normalisation, but the honest claim is redundancy,
+        not complementarity. The separator set above it is what actually
+        catches the stream case, and the resolved-parent check below is what
+        catches `..`.
         """
         anchor = _contained_member(tmp_path, _WHEEL)
         assert anchor == tmp_path / _WHEEL, "the ordinary case must still pass"
@@ -469,6 +532,41 @@ class TestARecordNamesFilesNotPathsToElsewhere:
 
         with pytest.raises(PublishError, match="is a symbolic link"):
             _contained_member(evidence, _WHEEL)
+
+    def test_a_stream_suffix_is_refused(self, tmp_path: Path) -> None:
+        """NTFS alternate data streams, which every other layer waves through.
+
+        `x.whl:payload` is its own basename to both path flavours, and its
+        resolved parent genuinely IS the evidence directory, so neither the
+        flavour check nor the parent check can see it -- while the bytes it
+        selects are ones `iterdir()` structurally cannot list. It was accepted
+        until the literal separator set was added, and it is the reason that
+        set exists rather than being belt-and-braces over the flavours.
+        """
+        with pytest.raises(PublishError, match="path or stream separator"):
+            _contained_member(tmp_path, f"{_WHEEL}:payload")
+
+    def test_an_artifact_with_a_second_name_is_refused(self, tmp_path: Path) -> None:
+        """A hard link has the property the symlink refusal exists to prevent.
+
+        Another name for the same bytes, writable between the digest check and
+        the upload, and `is_symlink()` returns False for it. On Windows it needs
+        no elevation, so it is the cheaper attack of the two -- and the ordinary
+        route in is a build or caching system that hardlinks into `dist/`.
+        Skipped where the platform cannot make one; the ubuntu CI legs run it.
+        """
+        evidence = tmp_path / "evidence"
+        _write_candidate(evidence)
+        elsewhere = tmp_path / "elsewhere.whl"
+        elsewhere.write_bytes((evidence / _WHEEL).read_bytes())
+        (evidence / _WHEEL).unlink()
+        try:
+            os.link(elsewhere, evidence / _WHEEL)
+        except (OSError, NotImplementedError, AttributeError) as exc:
+            pytest.skip(f"this platform or account cannot create hard links: {exc}")
+
+        with pytest.raises(PublishError, match="hard links"):
+            publish(evidence, "testpypi", _COMMIT, dry_run=True)
 
     def test_a_link_beside_the_artifacts_is_refused(self, tmp_path: Path) -> None:
         """The listing's own refusal, on a link the record never names.

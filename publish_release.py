@@ -44,12 +44,22 @@ be skipped by leaving an argument out.
 The other thing a record cannot be trusted to do is name a path.  It names
 *files in the evidence directory*, so every filename it carries must be an
 immediate member of that directory: no separators in either platform's spelling,
-no drive letters, no ``..``, and no symlinks in either direction.  A record
-filename that resolves elsewhere would otherwise pass the size and digest checks
-against a file the directory listing never saw, which makes the "no unnamed
-artifact" direction unenforceable and the directory claim false.  Refusing the
-shape is cheaper and more honest than resolving it: the trusted producer emits
+no drive letters, no ``..``, no NTFS stream suffix, and nothing reachable under
+a second name -- neither a symlink nor a hard link.  A record filename that
+resolves elsewhere would otherwise pass the size and digest checks against a
+file the directory listing never saw, which makes the "no unnamed artifact"
+direction unenforceable and the directory claim false.  Refusing the shape is
+cheaper and more honest than resolving it: the trusted producer emits
 ``path.name`` and nothing legitimate needs the other cases.
+
+The two directions are one rule and share one implementation, which they did not
+at first.  The listing side filtered on a tuple of artifact suffixes while the
+verification side filtered on nothing, so each direction leaked what the other
+would have caught: an untested ``REBUILT.WHL`` was invisible to the unnamed
+check because of its case, and a record naming ``payload.zip`` was verified and
+handed to twine.  Two checks that are supposed to describe one set must be
+written as one check over that set, or they drift apart exactly where nobody is
+looking.
 """
 
 from __future__ import annotations
@@ -65,7 +75,6 @@ from typing import Sequence
 
 
 _EVIDENCE_FILENAME = "release-evidence.json"
-_ARTIFACT_SUFFIXES = (".whl", ".tar.gz")
 
 # The same shape ``release_evidence.py`` requires of its own --expected-commit.
 # An abbreviation is refused rather than resolved: this command has no repository
@@ -174,22 +183,36 @@ def _contained_member(evidence_dir: Path, filename: str) -> Path:
     """Join a record-supplied filename onto the evidence directory, or refuse.
 
     The check is on the *shape* of the name, before the filesystem is consulted,
-    because the filesystem is what the escaping cases are trying to reach.  Both
-    path flavours are asked, not the running platform's: a record written on
-    Linux is consumed on Windows and the reverse, and each flavour recognises a
-    separator the other reads as an ordinary character.  ``PureWindowsPath``
-    catches ``a\\b`` and the drive-relative ``C:x``; ``PurePosixPath`` catches
-    ``a/b``.  ``.``, ``..`` and ``/abs/x`` all fail the same equality, since
-    none of them is its own basename.
+    because the filesystem is what the escaping cases are trying to reach.
 
-    The resolved-parent check afterwards is not redundant with it.  The shape
-    check says the name cannot describe a path out of the directory; the parent
-    check says the object it actually landed on is in the directory, which is a
-    different claim once symlinks exist -- law 10, where validation and action
-    must agree on what the input means.
+    Three layers, and it is worth being exact about which one does what, because
+    the first draft of this docstring was wrong about it and a wrong account of
+    which guard is load-bearing is how the next person deletes the wrong one:
+
+    * The literal separator set. ``/``, ``\\`` and ``:`` are refused outright.
+      ``:`` is here because of NTFS alternate data streams: ``x.whl:payload``
+      is its own basename to *both* path flavours, resolves to a parent that
+      genuinely is the evidence directory, and reads bytes the directory
+      listing structurally cannot see. Every layer below passed it.
+    * The two flavours. A record written on Linux is consumed on Windows and
+      the reverse. In practice ``PureWindowsPath`` refuses a strict superset of
+      what ``PurePosixPath`` does -- measured, not assumed -- so the posix half
+      catches nothing extra today; both are asked anyway, cheaply, rather than
+      pinning behaviour to one library's current normalisation. This is what
+      refuses ``.`` and ``/abs/x``.
+    * The resolved parent. This is what actually refuses ``..``, which *is* its
+      own basename in both flavours and passes the equality above. It is also
+      the layer that catches a Windows directory junction, since ``is_symlink``
+      returns False for one.
     """
     if not filename:
         raise PublishError("record names an artifact with an empty filename")
+    if any(char in filename for char in ("/", "\\", ":")):
+        raise PublishError(
+            f"record names {filename!r}, which carries a path or stream "
+            f"separator. A record names files in {evidence_dir}, and a name "
+            "containing / \\ or : is not a filename in it"
+        )
     if (
         PurePosixPath(filename).name != filename
         or PureWindowsPath(filename).name != filename
@@ -244,23 +267,41 @@ def verify_artifacts_match_record(
     # while the upload would hand twine the link -- and a dangling one would
     # vanish from the listing entirely, which is the quiet direction: a file
     # nobody can read is not a file nobody put there.
-    present: set[str] = set()
     for path in evidence_dir.iterdir():
-        if not path.name.endswith(_ARTIFACT_SUFFIXES):
-            continue
         if path.is_symlink():
             raise PublishError(
                 f"{evidence_dir} holds a symbolic link named {path.name}. "
                 "Nothing in an evidence directory may be a link: the bytes "
                 "that were tested are the ones that must be uploaded"
             )
-        if path.is_file():
-            present.add(path.name)
-    unnamed = present - named.keys()
+
+    # One rule, both directions, and no suffix inventory anywhere in it.
+    #
+    # This used to filter the listing through a two-entry tuple of suffixes
+    # with a case-sensitive `endswith`, while the verification loop below
+    # applied no suffix filter at all. So the two halves policed different
+    # sets, and both directions leaked: an untested `REBUILT.WHL` sitting in
+    # the directory was invisible to this check because of its case, and a
+    # record naming `payload.zip` -- or `notes.txt` -- was verified and handed
+    # to twine. Widening the tuple would have been the same defect with more
+    # entries in it.
+    #
+    # What the close condition actually says is that the uploaded files are the
+    # tested candidates and nothing travels beside them, so that is the rule:
+    # the directory holds the record and the artifacts the record names, and
+    # anything else refuses. Stricter than before -- a stray build log now
+    # refuses too -- which is the right direction for a command whose next step
+    # is irreversible, and the operator's remedy is to move the stray file.
+    unnamed = sorted(
+        entry.name
+        for entry in evidence_dir.iterdir()
+        if entry.name != _EVIDENCE_FILENAME and entry.name not in named
+    )
     if unnamed:
         raise PublishError(
-            f"{evidence_dir} holds artifacts the record does not name: "
-            f"{sorted(unnamed)}. Nothing tested them, so nothing may publish them"
+            f"{evidence_dir} holds files the record does not name: "
+            f"{unnamed}. Nothing tested them, so nothing may publish them; "
+            "move them elsewhere if they are not part of this release"
         )
 
     verified: list[Path] = []
@@ -269,9 +310,31 @@ def verify_artifacts_match_record(
         if not path.is_file():
             raise PublishError(f"record names {filename}, which is not in {evidence_dir}")
 
+        stat = path.stat()
+        if stat.st_nlink > 1:
+            # A hardlink has exactly the property the symlink refusal exists to
+            # prevent -- another name for these bytes, writable by anyone who
+            # holds it, between this digest check and the upload -- and it needs
+            # no elevation to create. `is_symlink()` cannot see it; the link
+            # count can.
+            raise PublishError(
+                f"{filename} has {stat.st_nlink} hard links. The bytes that "
+                "were tested must be reachable by exactly this name, or "
+                "something else can rewrite them after they are verified"
+            )
+
         expected_size = entry.get("size")
-        actual_size = path.stat().st_size
-        if isinstance(expected_size, int) and actual_size != expected_size:
+        # Refused rather than skipped. The neighbouring sha256 check already
+        # refuses a wrong type, and a size that silently opts out of comparison
+        # by not being an integer is the empty-scope default with the wrong
+        # valence -- omission permitting instead of refusing.
+        if not isinstance(expected_size, int) or isinstance(expected_size, bool):
+            raise PublishError(
+                f"record carries no usable size for {filename}: "
+                f"{expected_size!r} is not an integer"
+            )
+        actual_size = stat.st_size
+        if actual_size != expected_size:
             raise PublishError(
                 f"{filename} is {actual_size} bytes; the record recorded "
                 f"{expected_size}"

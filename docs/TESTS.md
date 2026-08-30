@@ -1,6 +1,6 @@
 # Test catalogue
 
-**535 test functions** across 21 files.
+**545 test functions** across 21 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -27,14 +27,14 @@ higher.
 | [`tests/test_support_claims.py`](../tests/test_support_claims.py) | 10 |
 | [`tests/test_documented_messages.py`](../tests/test_documented_messages.py) | 3 |
 | [`tests/test_egress.py`](../tests/test_egress.py) | 10 |
-| [`tests/test_verifier_non_vacuity.py`](../tests/test_verifier_non_vacuity.py) | 22 |
+| [`tests/test_verifier_non_vacuity.py`](../tests/test_verifier_non_vacuity.py) | 28 |
 | [`tests/test_mcp_auth.py`](../tests/test_mcp_auth.py) | 9 |
 | [`tests/test_audit_disclosure.py`](../tests/test_audit_disclosure.py) | 27 |
 | [`tests/test_archive_integrity.py`](../tests/test_archive_integrity.py) | 6 |
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 9 |
 | [`tests/test_release_evidence.py`](../tests/test_release_evidence.py) | 19 |
-| [`tests/test_publish_release.py`](../tests/test_publish_release.py) | 27 |
-| **Total** | **535** |
+| [`tests/test_publish_release.py`](../tests/test_publish_release.py) | 31 |
+| **Total** | **545** |
 
 ---
 
@@ -690,7 +690,7 @@ Outbound HTTP destination control at the connection layer. Which host forms reac
 
 The verifier is subject to the laws it enforces. Every evidence source verify_security() reads is driven to zero or to failure in turn, and the aggregate verdict must not stay green — including the cases that raise no error finding, where a headline pass used to sit on top of a checks list that said the opposite. Passing paths assert numeric counts, not booleans.
 
-22 tests.
+28 tests.
 
 - **the tree verifies clean** — The anchor. Every negative fixture below is measured against this.
 - **the secret scan reports a non zero file count** — A count, not a boolean.
@@ -714,6 +714,12 @@ The verifier is subject to the laws it enforces. Every evidence source verify_se
 - **the copy holds every tracked root python module** — The instance that started this, generalised to its class.
 - **a tree without source control refuses instead of copying less** — Fail closed: no manifest, no run, and the report says which.
 - **a tracked file missing from disk refuses** — The substrate must be faithful, and a partial copy is not the checkout.
+- **the sandbox itself refuses a manifest it cannot honour** — The same refusal, driven at `_Sandbox` rather than through the caller.
+- **a copy failure is a recorded refusal not an exception** — A locked file is ordinary on Windows; an escaping exception is not a report.
+- **a sandbox run that passed nothing cannot report a pass** — pytest exits 0 when every test skips, and a CI job now consumes this check.
+- **the secret scan opens every file that ships** — The sibling inventory, and the one this session edited by hand.
+- **the scan sees an untracked file in the root** — What the directory walk reaches and the tracked floor cannot.
+- **the scan sees a tracked file no walk would reach** — What the tracked floor reaches and the walks cannot.
 
 ---
 
@@ -842,7 +848,7 @@ Pins the publication gate to one explicit Git commit and tree. A dirty checkout,
 
 Pins the upload gate to the evidence record that vouches for the files. An incomplete release, a candidate nobody asserted as publishable, an artifact whose bytes no longer match the record, or an untested file sitting beside the tested ones must each refuse the upload rather than publish it.
 
-27 tests.
+31 tests.
 
 ### TestTheGateLetsAGoodCandidateThrough
 
@@ -861,6 +867,8 @@ Pins the upload gate to the evidence record that vouches for the files. An incom
 - **an artifact of the wrong size is refused**
 - **a missing artifact is refused**
 - **an artifact the record does not name is refused** — The direction that catches a rebuild dropped in beside the tested files.
+- **the two directions police the same set** — The asymmetry that let each direction leak what the other would catch.
+- **a size that is not a number is refused** — Omission permitted here while its neighbour refused.
 - **a record naming no artifacts is refused**
 ### TestTheDestinationIsNeverImplicit
 
@@ -882,6 +890,8 @@ Pins the upload gate to the evidence record that vouches for the files. An incom
 ### TestARecordNamesFilesNotPathsToElsewhere
 
 - **an artifact outside the directory is refused** — The audit's second finding, reproduced end to end.
-- **every escaping shape is refused** — Both platforms' separators, on whichever platform is running.
+- **every escaping shape is refused** — Every spelling, on whichever platform is running.
 - **a named artifact that is a link is refused** — Decided policy: no symlinks in an evidence directory, either direction.
+- **a stream suffix is refused** — NTFS alternate data streams, which every other layer waves through.
+- **an artifact with a second name is refused** — A hard link has the property the symlink refusal exists to prevent.
 - **a link beside the artifacts is refused** — The listing's own refusal, on a link the record never names.

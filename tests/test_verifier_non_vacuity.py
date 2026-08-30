@@ -87,7 +87,7 @@ def test_the_tree_verifies_clean(baseline):
     but skipping the case would leave nothing asserted in the environment the
     release gate actually runs, so assert the expected shape instead.
     """
-    if not (vt._root() / ".git").is_dir():
+    if not _root_has_source_control():
         assert _failed_checks(baseline) == ["sensitive_files"], (
             "with no .git present, sensitive_files is the only check that "
             f"should fail: {_failed_checks(baseline)}"
@@ -493,3 +493,151 @@ def test_a_tracked_file_missing_from_disk_refuses(tmp_path):
         for finding in result["findings"]
     )
     assert "module.py" in _check(result, "sandbox_manifest")["detail"]
+
+
+def test_the_sandbox_itself_refuses_a_manifest_it_cannot_honour(tmp_path):
+    """The same refusal, driven at `_Sandbox` rather than through the caller.
+
+    `verify_code_dynamic` pre-checks the manifest before constructing the box,
+    so the test above never reaches the box's own guard -- deleting that guard
+    entirely left the whole suite green. Two enforcement points behind one
+    observable are one control to any test that cannot tell them apart, and the
+    box's guard is the one that still matters when a file disappears between
+    the pre-check and the copy.
+    """
+    root = _staged_repo(tmp_path)
+    (root / "pkg" / "module.py").unlink()
+    with patch.object(vt, "_root", lambda: root):
+        with pytest.raises(vt._SandboxManifestError, match="not present"):
+            with vt._Sandbox():
+                pass
+
+
+@requires_a_reachable_dynamic_phase
+def test_a_copy_failure_is_a_recorded_refusal_not_an_exception(tmp_path):
+    """A locked file is ordinary on Windows; an escaping exception is not a report.
+
+    The refusal path wrapped only the enumeration, so anything raised during
+    the copy -- `PermissionError`, a full temp volume -- propagated out of
+    `verify_code_dynamic` and out of `verify_output`, handing an in-process
+    caller an exception where the contract promises a structured verdict. The
+    comment above that block claimed the opposite.
+    """
+    root = _staged_repo(tmp_path)
+
+    def locked(src, dst, *args, **kwargs):
+        raise PermissionError(13, "file locked by another process")
+
+    with patch.object(vt, "_root", lambda: root), \
+            patch.object(vt.shutil, "copy2", locked):
+        result = vt.verify_code_dynamic()
+
+    assert result["passed"] is False
+    assert any(
+        finding["code"] == "SANDBOX_MANIFEST_UNAVAILABLE"
+        for finding in result["findings"]
+    )
+    assert "file locked" in _check(result, "sandbox_manifest")["detail"]
+
+
+@requires_a_reachable_dynamic_phase
+def test_a_sandbox_run_that_passed_nothing_cannot_report_a_pass(tmp_path):
+    """pytest exits 0 when every test skips, and a CI job now consumes this check.
+
+    The dynamic phase read only the exit code, so "everything skipped" was
+    recorded as `test_suite: passed`. That is the same vacuity this file's
+    header states as a rule and applies to `secret_scan` and
+    `guard_completeness` -- a count, not a boolean.
+    """
+    from types import SimpleNamespace
+
+    real_run = vt.subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[:1] == ["git"]:
+            return real_run(cmd, *args, **kwargs)
+        if "pytest" in cmd:
+            return SimpleNamespace(returncode=0, stdout="2 skipped in 0.01s", stderr="")
+        return SimpleNamespace(returncode=0, stdout="OK\n", stderr="")
+
+    with patch.object(vt.subprocess, "run", fake_run):
+        result = vt.verify_code_dynamic()
+
+    assert result["passed"] is False
+    assert "test_suite" in _failed_checks(result)
+    assert any(finding["code"] == "NO_TESTS_PASSED" for finding in result["findings"])
+
+
+@requires_source_control
+def test_the_secret_scan_opens_every_file_that_ships():
+    """The sibling inventory, and the one this session edited by hand.
+
+    `_iter_scannable_files` walked `_SCAN_DIRS` plus a hand-written tuple of
+    nine root filenames. Adding `publish_release.py` to that tuple -- in the
+    same commit that replaced the sandbox's hand-kept lists -- left it two
+    files short: `SECURITY.md` and `.gitattributes` were tracked, shipped, and
+    never opened, so a credential committed to SECURITY.md passed
+    `verify_security()` clean.
+
+    Asserting the tracked set rather than those two names, because naming them
+    would pass again the moment a tenth root file is added and forgotten.
+    """
+    scanned = {path.resolve() for path in vt._iter_scannable_files()}
+    tracked = {(vt._root() / name).resolve() for name in vt._tracked_paths(vt._root())}
+
+    missed = sorted(str(path) for path in tracked - scanned)
+    assert missed == [], f"tracked files the secret scan never opens: {missed}"
+
+
+# The scan has two halves and they overlap on almost every file in this
+# repository, so the assertion above passes with either one deleted -- the same
+# two-controls-one-observable shape that hid a symlink guard and a manifest
+# guard earlier in this work. What each half uniquely reaches is what each of
+# the next two tests pins.
+
+
+def test_the_scan_sees_an_untracked_file_in_the_root(tmp_path):
+    """What the directory walk reaches and the tracked floor cannot.
+
+    An uncommitted `.env` beside `pyproject.toml` is the case a secret scan
+    most obviously exists for, and it is invisible to anything derived from
+    `git ls-files`.
+    """
+    root = _staged_repo(tmp_path)
+    (root / ".env").write_text("TOKEN=not-committed\n", encoding="utf-8")
+
+    with patch.object(vt, "_root", lambda: root):
+        scanned = {path.name for path in vt._iter_scannable_files()}
+
+    assert ".env" in scanned, (
+        "an untracked root file is invisible to the tracked floor; the "
+        "directory walk is what reaches it"
+    )
+
+
+def test_the_scan_sees_a_tracked_file_no_walk_would_reach(tmp_path):
+    """What the tracked floor reaches and the walks cannot.
+
+    A tracked file in a directory that is neither the root nor one of
+    `_SCAN_DIRS`. Adding its directory to `_SCAN_DIRS` by hand is precisely the
+    move this whole change is replacing.
+    """
+    root = _staged_repo(tmp_path)
+    outside = root / "packaging" / "notes.md"
+    outside.parent.mkdir()
+    outside.write_text("nothing secret here\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "packaging/notes.md"],
+        cwd=root, check=True, capture_output=True,
+    )
+
+    with patch.object(vt, "_root", lambda: root):
+        scanned = {
+            str(path.relative_to(root)).replace("\\", "/")
+            for path in vt._iter_scannable_files()
+        }
+
+    assert "packaging/notes.md" in scanned, (
+        "neither the root listing nor _SCAN_DIRS reaches this; the tracked "
+        "floor is what does"
+    )

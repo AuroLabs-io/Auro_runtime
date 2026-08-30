@@ -147,10 +147,23 @@ def _tracked_paths(root: Path) -> list[str]:
     less than the checkout, running a suite that passes because what it would
     have failed on is absent.
     """
+    # Sanitized environment, for the same reason the sandbox gets one: GIT_DIR,
+    # GIT_WORK_TREE and GIT_INDEX_FILE in the ambient environment redefine which
+    # tree this enumerates, and the manifest is now the root of the whole
+    # control. No demonstrated bypass -- a redirected manifest names files that
+    # are not under `root`, so the caller's presence check refuses -- but a
+    # control whose input can be redirected from outside should not depend on
+    # every downstream check noticing.
+    #
+    # `safe.directory` matches what release_evidence.py already passes: a
+    # checkout owned by another uid (a container bind-mount, a shared build
+    # directory) otherwise fails here while the sibling command succeeds on the
+    # same tree.
+    env = {k: v for k, v in os.environ.items() if k in _SANITIZED_ENV_KEYS}
     try:
         result = subprocess.run(
-            ["git", "ls-files", "-z"],
-            capture_output=True, timeout=60, cwd=str(root),
+            ["git", "-c", f"safe.directory={root}", "ls-files", "-z"],
+            capture_output=True, timeout=60, cwd=str(root), env=env,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise _SandboxManifestError(f"could not run git ls-files in {root}: {exc}") from exc
@@ -275,6 +288,20 @@ def _pytest_summary(stdout: str, tail: int = 400) -> str:
     return "[pytest produced no output]"
 
 
+_PYTEST_PASSED_RE = re.compile(r"(\d+)\s+passed", re.IGNORECASE)
+
+
+def _passed_count(summary: str) -> int:
+    """How many tests actually passed, or zero if the line does not say.
+
+    Exists so a caller can refuse a run that passed nothing. pytest exits 0 for
+    a run in which every test skipped, and a check that reads only the exit code
+    cannot tell that from a suite that ran.
+    """
+    match = _PYTEST_PASSED_RE.search(summary or "")
+    return int(match.group(1)) if match else 0
+
+
 _SCANNABLE_SUFFIXES = frozenset({
     ".py", ".md", ".yaml", ".yml", ".toml", ".txt", ".json", ".cfg", ".ini", ".env", "",
 })
@@ -288,31 +315,61 @@ def _iter_scannable_files():
     nothing outside a git repo, on a clean tree, or in a fresh clone.
     """
     root = _root()
+    seen: set[Path] = set()
+
+    def offer(path: Path):
+        if path in seen or not path.is_file():
+            return None
+        if any(part in _SCAN_SKIP_DIRS for part in path.parts):
+            return None
+        seen.add(path)
+        return path
+
     for src_dir in _SCAN_DIRS:
         base = root / src_dir
         if not base.is_dir():
             continue
         for path in sorted(base.rglob("*")):
-            if not path.is_file():
-                continue
-            if any(part in _SCAN_SKIP_DIRS for part in path.parts):
-                continue
-            if path.suffix.lower() in _SCANNABLE_SUFFIXES:
+            if path.suffix.lower() in _SCANNABLE_SUFFIXES and offer(path):
                 yield path
-    for name in (
-        "pyproject.toml",
-        "setup.py",
-        "setup.cfg",
-        "LICENSE",
-        "README.md",
-        "MANIFEST.in",
-        ".gitignore",
-        "release_evidence.py",
-        "publish_release.py",
-    ):
-        p = root / name
-        if p.is_file():
-            yield p
+
+    # Every file in the root, rather than a list of the ones somebody thought of.
+    #
+    # This was a hand-written tuple of nine filenames, and on the day it was
+    # last edited -- by hand, to add publish_release.py, in the same commit that
+    # replaced the sandbox's hand-kept lists -- it was two files short:
+    # SECURITY.md and .gitattributes were tracked, shipped, and never opened by
+    # the scan. A credential committed to SECURITY.md passed verify_security()
+    # clean, and SECURITY.md is the file most likely to carry contact addresses
+    # and pasted reproduction detail from a report.
+    #
+    # Listing the directory needs no inventory and cannot fall behind one. It
+    # also covers untracked root files, which is where a secret scan earns its
+    # keep: an uncommitted .env is exactly what it should find.
+    # No suffix filter on this walk or the tracked one below, and that is the
+    # second half of the same lesson: the old tuple named `MANIFEST.in`
+    # explicitly, which meant it was scanned despite `.in` not being in
+    # `_SCANNABLE_SUFFIXES`. Filtering these by suffix would have quietly
+    # dropped it while appearing to widen coverage. A file that ships can carry
+    # a secret whatever it is called; the reader already decodes with
+    # `errors="ignore"`, so a binary is noise rather than a crash.
+    for path in sorted(root.iterdir()):
+        if offer(path):
+            yield path
+
+    # And everything Git tracks, as a floor under both walks above -- it reaches
+    # a tracked file in a directory neither `_SCAN_DIRS` nor the root covers.
+    try:
+        tracked = _tracked_paths(root)
+    except _SandboxManifestError:
+        # No source control here. The walk above still ran; this only means the
+        # floor is unavailable, and `verify_security` separately fails the run
+        # when git cannot be queried.
+        tracked = []
+    for name in tracked:
+        path = offer(root / name)
+        if path is not None:
+            yield path
 
 
 class _SubcheckRecorded(Exception):
@@ -699,15 +756,39 @@ def verify_code_dynamic() -> dict:
         ))
         return _summarize_with_checks(errors, checks)
 
+    # The copy itself can fail too -- a locked file, a full temp volume, a
+    # permission error -- and those are ordinary on Windows rather than exotic.
+    # An earlier version wrapped only the enumeration above and left the copy
+    # outside it, so a `PermissionError` propagated out of this function and out
+    # of `verify_output`, handing every in-process caller an exception where the
+    # contract promises a report.
     box = _Sandbox(tracked=tracked)
-    with box as sandbox:
+    try:
+        sandbox = box.__enter__()
+    except (_SandboxManifestError, OSError) as exc:
+        checks.append({
+            "name": "sandbox_manifest",
+            "passed": False,
+            "detail": f"the sandbox copy could not be made: {exc}",
+        })
+        errors.append(_make_finding(
+            SEVERITY_ERROR, "SANDBOX_MANIFEST_UNAVAILABLE",
+            f"The sandbox copy could not be made, so nothing was executed: {exc}",
+        ))
+        return _summarize_with_checks(errors, checks)
+
+    try:
         env = box.env()
         checks.append({
             "name": "sandbox_manifest",
             "passed": True,
             "detail": (
-                f"{box.copied} tracked files copied from git ls-files; the "
-                "sandbox is the tracked tree, not an approximation of it"
+                f"{box.copied} tracked files copied from git ls-files. The file "
+                "SET is the tracked tree; the CONTENTS are the working tree, "
+                "which is the point -- this reports on the checkout in front of "
+                "you, including edits you have not committed. On Windows that "
+                "means line endings can differ from HEAD where .gitattributes "
+                "normalises them"
             ),
         })
 
@@ -769,7 +850,12 @@ def verify_code_dynamic() -> dict:
                 # pytest -q twice, and -qq suppresses the summary line entirely — leaving
                 # a caller with nothing but progress bars to infer a result from.
                 [python, "-m", "pytest", "-o", "addopts=", "--tb=short", "-q", "-p", "no:cacheprovider"],
-                capture_output=True, text=True, timeout=120,
+                # 120s was about twice the measured runtime, which is thin on a
+                # two-core CI runner now that a job consumes this. A timeout
+                # fails closed, so the cost of the old value was a flaky red
+                # rather than a false green -- but a flaky red is how a job
+                # earns the reputation that gets it removed.
+                capture_output=True, text=True, timeout=600,
                 cwd=str(sandbox),
                 env=env,
             )
@@ -778,7 +864,17 @@ def verify_code_dynamic() -> dict:
                 checks.append({"name": "test_suite", "passed": False, "detail": detail})
                 errors.append(_make_finding("error", "PYTEST_MISSING", detail))
             elif result.returncode == 0:
-                checks.append({"name": "test_suite", "passed": True, "detail": _pytest_summary(result.stdout)})
+                summary = _pytest_summary(result.stdout)
+                # A run in which everything skipped exits 0, and this check is
+                # what the CI job consumes. Zero population is a failure here
+                # for the same reason it is for the secret scan: "all tests
+                # passed" over no tests is not a result.
+                if _passed_count(summary) < 1:
+                    detail = f"no test passed in the sandbox: {summary}"
+                    checks.append({"name": "test_suite", "passed": False, "detail": detail})
+                    errors.append(_make_finding("error", "NO_TESTS_PASSED", detail))
+                else:
+                    checks.append({"name": "test_suite", "passed": True, "detail": summary})
             elif result.returncode == 5:
                 detail = "No tests collected"
                 checks.append({"name": "test_suite", "passed": False, "detail": detail})
@@ -787,10 +883,12 @@ def verify_code_dynamic() -> dict:
                 checks.append({"name": "test_suite", "passed": False, "detail": result.stdout.strip()[-500:]})
                 errors.append(_make_finding("error", "TEST_FAILURE", "Test suite failed"))
         except subprocess.TimeoutExpired:
-            checks.append({"name": "test_suite", "passed": False, "detail": "Test suite timed out (120s)"})
-            errors.append(_make_finding("error", "TEST_TIMEOUT", "Test suite timed out after 120s"))
+            checks.append({"name": "test_suite", "passed": False, "detail": "Test suite timed out (600s)"})
+            errors.append(_make_finding("error", "TEST_TIMEOUT", "Test suite timed out after 600s"))
         except Exception as e:
             checks.append({"name": "test_suite", "passed": False, "detail": str(e)})
+    finally:
+        box.__exit__(None, None, None)
 
     result = _summarize_with_checks(errors, checks)
     return result
