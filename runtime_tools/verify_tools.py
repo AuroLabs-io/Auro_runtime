@@ -35,25 +35,32 @@ from auro_runtime.sensitive_paths import classify_text
 
 _PROJECT_ROOT = None
 
-# What the sandbox copies. Everything the copied suite READS has to be here,
-# not merely everything it imports, and that has now been learned three times:
-# "tests" because verify_code_dynamic runs pytest inside the temporary copy,
-# "docs" because the copied suite validates its generated catalogue, and
-# ".github" because test_support_claims reads the CI workflow to check the
-# support matrix. Each was added after the copied suite failed without it.
+# What the sandbox used to copy, and no longer does. Kept only as the scan
+# inventory below, because that answers a different question.
 #
-# The failure is quiet in the direction that matters: the suite passes in CI,
+# This list was a hand-kept approximation of a faithful checkout, and it was
+# wrong four times: "tests" because verify_code_dynamic runs pytest inside the
+# copy, "docs" because the copied suite validates its generated catalogue,
+# ".github" because test_support_claims reads the CI workflow, and finally
+# "publish_release.py" -- on the root-files list beside it -- because the copied
+# suite imports it. Each was added after the copy failed without it, which is
+# the signature of an inventory maintained by noticing rather than by deriving.
+#
+# The failure was quiet in the direction that matters: the suite passes in CI,
 # which runs against the real checkout, and fails only under
-# verify_code_dynamic, which nothing in CI calls. A test that reads a path
-# this list does not carry is invisible until someone runs the verifier by
-# hand. Nothing keeps the two in sync -- see the open thread on the class.
-_SOURCE_DIRS = ["auro_runtime", "runtime_tools", "tests", "docs", ".github"]
+# verify_code_dynamic, which nothing in CI called. As of 2026-08-30 the sandbox
+# copies the tracked tree (`git ls-files`) instead, so a file the suite reads is
+# in the copy because it is in the repository, not because somebody remembered
+# it -- and CI runs the dynamic verifier, so the next divergence cannot wait for
+# an operator to run it by hand.
+_LEGACY_SOURCE_DIRS = ["auro_runtime", "runtime_tools", "tests", "docs", ".github"]
 
-# Currently identical to _SOURCE_DIRS, and kept separate because they answer
-# different questions: what a faithful copy needs, versus what a whole-tree
-# scan walks. ".github" was appended here alone until it turned out the
-# copied suite needed it too.
-_SCAN_DIRS = [*_SOURCE_DIRS]
+# What a whole-tree scan walks -- still hand-kept, and deliberately so for now:
+# the copy must equal the repository, while the scan wants to see files that are
+# NOT in the repository too (an untracked .env is exactly what a secret scan is
+# for). Deriving this one from `git ls-files` would narrow it. The positive
+# inventory here is therefore still open on its card; only the copy is closed.
+_SCAN_DIRS = [*_LEGACY_SOURCE_DIRS]
 
 _SANITIZED_ENV_KEYS = {
     "PATH", "SYSTEMROOT", "TEMP", "TMP", "COMSPEC",
@@ -123,34 +130,91 @@ def _source_checkout_failure() -> dict | None:
 # Sandbox helper
 # ---------------------------------------------------------------------------
 
+class _SandboxManifestError(RuntimeError):
+    """The tracked tree could not be enumerated, so no faithful copy can be made."""
+
+
+def _tracked_paths(root: Path) -> list[str]:
+    """Every file Git is tracking, as repository-relative paths.
+
+    This replaces the two hand-kept lists that used to approximate it. The
+    difference that matters is not that it is shorter: it is that it cannot
+    fall behind. A file the copied suite reads is in the copy because somebody
+    committed it, and there is no second place to remember to add it.
+
+    Failure is refusal, not a narrower copy. Falling back to a partial list
+    would restore the exact defect this closes -- a sandbox that quietly holds
+    less than the checkout, running a suite that passes because what it would
+    have failed on is absent.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "-z"],
+            capture_output=True, timeout=60, cwd=str(root),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise _SandboxManifestError(f"could not run git ls-files in {root}: {exc}") from exc
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", "replace").strip()[:200]
+        raise _SandboxManifestError(
+            f"git ls-files failed in {root} (exit {result.returncode}): {stderr}"
+        )
+    try:
+        listing = result.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise _SandboxManifestError(f"git ls-files returned undecodable paths: {exc}") from exc
+
+    names = [name for name in listing.split("\0") if name]
+    if not names:
+        # Law 1: an empty manifest would copy nothing, and a suite that cannot
+        # be collected is not a suite that passed.
+        raise _SandboxManifestError(f"git ls-files listed no files in {root}")
+    return names
+
+
 class _Sandbox:
     """
-    Copy source directories to a temp location for safe dynamic execution.
+    Copy the tracked source tree to a temp location for safe dynamic execution.
     The real project root is never the cwd of a dynamic check.
     """
 
-    def __init__(self):
+    def __init__(self, tracked: list[str] | None = None):
         self._tmpdir = None
         self._path = None
+        self._tracked = tracked
+        self.copied = 0
 
     def __enter__(self) -> Path:
+        names = self._tracked if self._tracked is not None else _tracked_paths(_root())
+
         self._tmpdir = tempfile.mkdtemp(prefix="auro_verify_")
         sandbox = Path(self._tmpdir)
 
-        for src_dir in _SOURCE_DIRS:
-            src = _root() / src_dir
-            if src.exists():
-                shutil.copytree(src, sandbox / src_dir, dirs_exist_ok=True)
+        missing = []
+        copied = 0
+        for name in names:
+            src = _root() / name
+            if not src.is_file():
+                # Tracked and not on disk: a deleted file that is not committed
+                # yet, or a submodule gitlink. Either way the copy would differ
+                # from both HEAD and the working tree, so it is named rather
+                # than skipped -- law 5, the substrate must be faithful.
+                missing.append(name)
+                continue
+            dest = sandbox / name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest)
+            copied += 1
 
-        # Root files that make the sandbox a faithful snapshot of the project,
-        # not just enough to import it — tests may legitimately assert on them.
-        for config_file in ["pyproject.toml", "setup.py", "setup.cfg",
-                            "LICENSE", ".gitignore", "README.md",
-                            "release_evidence.py"]:
-            src = _root() / config_file
-            if src.exists():
-                shutil.copy2(src, sandbox / config_file)
+        if missing:
+            shutil.rmtree(self._tmpdir, ignore_errors=True)
+            self._tmpdir = None
+            raise _SandboxManifestError(
+                f"{len(missing)} tracked file(s) are not present in {_root()}, "
+                f"so the copy would not be the checkout: {sorted(missing)[:5]}"
+            )
 
+        self.copied = copied
         self._path = sandbox
         return sandbox
 
@@ -244,6 +308,7 @@ def _iter_scannable_files():
         "MANIFEST.in",
         ".gitignore",
         "release_evidence.py",
+        "publish_release.py",
     ):
         p = root / name
         if p.is_file():
@@ -608,10 +673,43 @@ def verify_code_dynamic() -> dict:
             ),
         })
 
-    with _Sandbox() as sandbox:
-        sandbox_env = _Sandbox()
-        sandbox_env._path = sandbox
-        env = sandbox_env.env()
+    # Enumerate before copying, so a manifest that cannot be derived is a
+    # recorded refusal rather than an exception escaping the verifier. The old
+    # copy could not fail this way: it took whatever the hand-kept list named
+    # and ran a suite over the result, which is why four omissions in a row
+    # presented as a green run against an incomplete tree.
+    try:
+        tracked = _tracked_paths(_root())
+        absent = sorted(name for name in tracked if not (_root() / name).is_file())
+        if absent:
+            raise _SandboxManifestError(
+                f"{len(absent)} tracked file(s) are not present in {_root()}, "
+                f"so the sandbox would not be the checkout: {absent[:5]}"
+            )
+    except _SandboxManifestError as exc:
+        checks.append({
+            "name": "sandbox_manifest",
+            "passed": False,
+            "detail": str(exc),
+        })
+        errors.append(_make_finding(
+            SEVERITY_ERROR, "SANDBOX_MANIFEST_UNAVAILABLE",
+            f"The sandbox copy could not be derived from the tracked tree, so "
+            f"nothing was executed: {exc}",
+        ))
+        return _summarize_with_checks(errors, checks)
+
+    box = _Sandbox(tracked=tracked)
+    with box as sandbox:
+        env = box.env()
+        checks.append({
+            "name": "sandbox_manifest",
+            "passed": True,
+            "detail": (
+                f"{box.copied} tracked files copied from git ls-files; the "
+                "sandbox is the tracked tree, not an approximation of it"
+            ),
+        })
 
         # 1. Import check
         try:

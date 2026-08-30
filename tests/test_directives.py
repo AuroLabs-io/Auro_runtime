@@ -23,6 +23,25 @@ from auro_runtime.schemas import DirectiveCategory, DirectiveMetadata
 VALID_CATEGORIES = set(DirectiveCategory.__args__)
 
 
+def _root_has_source_control() -> bool:
+    from runtime_tools import verify_tools
+
+    try:
+        return (verify_tools._root() / ".git").exists()
+    except Exception:
+        return False
+
+
+# The verifier's sandbox is a copy of the tracked tree with no `.git` in it, and
+# the dynamic phase runs this suite inside that copy. Anything here that builds
+# a sandbox of its own, or expects `verify_code_dynamic` to derive a manifest,
+# has no question to ask in that environment.
+requires_source_control = pytest.mark.skipif(
+    not _root_has_source_control(),
+    reason="the sandbox copy is derived from `git ls-files`; this tree has no .git",
+)
+
+
 class TestEmptyToolScopeFailsClosed:
     """
     An empty or undeclared `tools:` must grant NO tools.
@@ -267,6 +286,7 @@ def test_verifiers_are_not_reachable_from_a_directive(directives_dir, registry):
         assert not named, f"{path.name} grants verifier tools: {named}"
 
 
+@requires_source_control
 @pytest.mark.parametrize(
     ("pytest_result", "expected_code"),
     [
@@ -282,10 +302,21 @@ def test_dynamic_verifier_fails_when_test_phase_is_vacuous(
 
     from runtime_tools import verify_tools
 
+    real_run = verify_tools.subprocess.run
     calls = 0
 
-    def fake_run(*args, **kwargs):
+    def fake_run(cmd, *args, **kwargs):
+        """Fake the three sandbox subprocesses; let the manifest derive for real.
+
+        Dispatching on the command rather than counting calls: the counter broke
+        the day the sandbox started deriving its copy from `git ls-files`, which
+        made the manifest call number one and shifted every arm of this fixture
+        by one. A fixture whose arms are positional is a fixture that silently
+        re-aims when the code under test grows a step.
+        """
         nonlocal calls
+        if cmd[:1] == ["git"]:
+            return real_run(cmd, *args, **kwargs)
         calls += 1
         if calls == 1:
             return SimpleNamespace(returncode=0, stdout="17\n", stderr="")
@@ -304,12 +335,19 @@ def test_dynamic_verifier_fails_when_test_phase_is_vacuous(
     assert test_check["passed"] is False
 
 
+@requires_source_control
 def test_dynamic_verifier_copies_test_catalogue():
-    """The temporary project must contain the generated file its tests validate."""
+    """The temporary project must contain the generated file its tests validate.
+
+    This asserted two strings were present in a hand-kept list, which is a claim
+    about the list rather than about the copy -- and the list is exactly the
+    thing that kept being wrong. Now it builds the sandbox and looks.
+    """
     from runtime_tools import verify_tools
 
-    assert "tests" in verify_tools._SOURCE_DIRS
-    assert "docs" in verify_tools._SOURCE_DIRS
+    with verify_tools._Sandbox() as sandbox:
+        assert (sandbox / "docs" / "TESTS.md").is_file()
+        assert (sandbox / "tests" / "test_registry.py").is_file()
 
 
 def test_test_coverage_audit_writes_only_to_a_writable_dir(directives_dir):

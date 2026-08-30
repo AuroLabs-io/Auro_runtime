@@ -1,6 +1,6 @@
 # Test catalogue
 
-**520 test functions** across 21 files.
+**534 test functions** across 21 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -27,14 +27,14 @@ higher.
 | [`tests/test_support_claims.py`](../tests/test_support_claims.py) | 10 |
 | [`tests/test_documented_messages.py`](../tests/test_documented_messages.py) | 3 |
 | [`tests/test_egress.py`](../tests/test_egress.py) | 10 |
-| [`tests/test_verifier_non_vacuity.py`](../tests/test_verifier_non_vacuity.py) | 18 |
+| [`tests/test_verifier_non_vacuity.py`](../tests/test_verifier_non_vacuity.py) | 22 |
 | [`tests/test_mcp_auth.py`](../tests/test_mcp_auth.py) | 9 |
 | [`tests/test_audit_disclosure.py`](../tests/test_audit_disclosure.py) | 27 |
 | [`tests/test_archive_integrity.py`](../tests/test_archive_integrity.py) | 6 |
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 9 |
 | [`tests/test_release_evidence.py`](../tests/test_release_evidence.py) | 19 |
-| [`tests/test_publish_release.py`](../tests/test_publish_release.py) | 16 |
-| **Total** | **520** |
+| [`tests/test_publish_release.py`](../tests/test_publish_release.py) | 26 |
+| **Total** | **534** |
 
 ---
 
@@ -690,7 +690,7 @@ Outbound HTTP destination control at the connection layer. Which host forms reac
 
 The verifier is subject to the laws it enforces. Every evidence source verify_security() reads is driven to zero or to failure in turn, and the aggregate verdict must not stay green — including the cases that raise no error finding, where a headline pass used to sit on top of a checks list that said the opposite. Passing paths assert numeric counts, not booleans.
 
-18 tests.
+22 tests.
 
 - **the tree verifies clean** — The anchor. Every negative fixture below is measured against this.
 - **the secret scan reports a non zero file count** — A count, not a boolean.
@@ -710,6 +710,10 @@ The verifier is subject to the laws it enforces. Every evidence source verify_se
 - **a marker naming an unrelated real directory is ignored** — A directory that exists but does not contain the running module.
 - **the sandbox marker carries a root that satisfies the reader** — Binds the writer to the reader. `_Sandbox.env()` and
 - **an ambient marker leaves the dynamic phase reachable** — The read site must branch on containment, not on the raw variable. Proven
+- **the sandbox copies what git tracks not what a list names** — The derivation, on a tree no inventory in this file has ever seen.
+- **the copy holds every tracked root python module** — The instance that started this, generalised to its class.
+- **a tree without source control refuses instead of copying less** — Fail closed: no manifest, no run, and the report says which.
+- **a tracked file missing from disk refuses** — The substrate must be faithful, and a partial copy is not the checkout.
 
 ---
 
@@ -838,7 +842,7 @@ Pins the publication gate to one explicit Git commit and tree. A dirty checkout,
 
 Pins the upload gate to the evidence record that vouches for the files. An incomplete release, a candidate nobody asserted as publishable, an artifact whose bytes no longer match the record, or an untested file sitting beside the tested ones must each refuse the upload rather than publish it.
 
-16 tests.
+26 tests.
 
 ### TestTheGateLetsAGoodCandidateThrough
 
@@ -862,7 +866,21 @@ Pins the upload gate to the evidence record that vouches for the files. An incom
 
 - **an unknown repository is refused**
 - **the parser requires a repository** — No default means forgetting to choose cannot pick the irreversible one.
+- **the parser requires an expected commit** — The argument whose absence used to be a pass.
+- **the parser accepts the complete command** — The anchor: with all three supplied, nothing exits.
 ### TestTheGuardsAreLoadBearing
 
 - **record verification rejects each disqualification**
 - **artifact verification needs both directions**
+### TestTheRecordMustAgreeWithReleaseIntent
+
+- **a stale but valid candidate is refused** — The 2026-08-29 audit's finding, reproduced rather than cited.
+- **an absent intent cannot reach the gates** — Defence in depth behind the parser, for callers inside this repo.
+- **an abbreviation is refused rather than resolved** — A prefix comparison would accept a shorter claim each time it is asked.
+- **the comparison is case insensitive** — Git object ids are hex; an operator pasting upper case meant the same commit.
+### TestARecordNamesFilesNotPathsToElsewhere
+
+- **an artifact outside the directory is refused** — The audit's second finding, reproduced end to end.
+- **every escaping shape is refused** — Both platforms' separators, on whichever platform is running.
+- **a named artifact that is a link is refused** — Decided policy: no symlinks in an evidence directory, either direction.
+- **a link beside the artifacts is refused** — The listing's own refusal, on a link the record never names.

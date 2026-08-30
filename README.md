@@ -624,12 +624,15 @@ CI supplies GitHub's workflow commit as `--expected-commit` and retains the thre
 python -B publish_release.py \
   --evidence-dir dist \
   --repository testpypi \
+  --expected-commit "$(git rev-parse HEAD)" \
   --dry-run
 ```
 
-Every gate runs before anything leaves the machine. The record must assert `release_complete` and `publication_candidate`; every file it names must be present, the right size, and match its recorded SHA-256; and the directory must contain **no** artifact the record does not name, since a file travelling beside the tested ones is a file nobody tested. Any failure refuses the upload, and rebuilding is not a recovery this command offers — go back and produce a record for what you actually want to publish.
+Every gate runs before anything leaves the machine. The record must assert `release_complete` and `publication_candidate`; every file it names must be present, the right size, and match its recorded SHA-256; every filename it carries must be an immediate member of the evidence directory rather than a path out of it, and nothing in that directory may be a symbolic link; and the directory must contain **no** artifact the record does not name, since a file travelling beside the tested ones is a file nobody tested. Any failure refuses the upload, and rebuilding is not a recovery this command offers — go back and produce a record for what you actually want to publish.
 
-`--dry-run` runs all of it and stops before uploading, which needs no credentials and no network. Rehearse there first: a version number cannot be reused once consumed, on TestPyPI or on PyPI. Drop `--dry-run` and set `--repository pypi` for the real thing. `--repository` has no default, because neither possible default is safe to get by forgetting to choose. Credentials are twine's: it reads `TWINE_USERNAME` and `TWINE_PASSWORD` or `~/.pypirc` in its own process, and this script never sees, stores, or logs them.
+`--expected-commit` is **required**, and it is the one gate the record cannot supply for you. The record proves which commit produced these files; only you can say which commit this release is meant to be, so the comparison is between the candidate's identity and your intent. Substituting `git rev-parse HEAD` is right when you are publishing the checkout in front of you, and wrong when you are publishing a candidate CI retained — there, name that workflow's commit explicitly, because your local `HEAD` is a different claim. The full 40-character id is required and an abbreviation is refused: this command has no repository to resolve one against. It was optional until 2026-08-30, which meant an older valid candidate — a stale `dist/`, or last week's CI artifact — cleared every other gate here and would have uploaded.
+
+`--dry-run` runs all of it and stops before uploading, which needs no credentials and no network. Rehearse there first: a version number cannot be reused once consumed, on TestPyPI or on PyPI. Drop `--dry-run` and set `--repository pypi` for the real thing, keeping `--expected-commit` on the command — the rehearsal proves nothing about a release you then publish without it. `--repository` has no default, because neither possible default is safe to get by forgetting to choose. Credentials are twine's: it reads `TWINE_USERNAME` and `TWINE_PASSWORD` or `~/.pypirc` in its own process, and this script never sees, stores, or logs them.
 
 ---
 

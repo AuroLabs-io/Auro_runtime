@@ -18,6 +18,7 @@ Two kinds of assertion here, and the distinction is the point:
   input that should break it.
 """
 
+import subprocess
 from unittest.mock import patch
 
 import pytest
@@ -26,6 +27,36 @@ import auro_runtime.executor as executor_mod
 import auro_runtime.policy as policy_mod
 from auro_runtime.paths import get_policies_dir
 import runtime_tools.verify_tools as vt
+
+
+def _root_has_source_control() -> bool:
+    try:
+        return (vt._root() / ".git").exists()
+    except Exception:
+        return False
+
+
+# Two different environments, two different skips, and keeping them apart is the
+# point. The verifier's own sandbox is a copy of the tracked tree WITHOUT `.git`
+# -- deliberately, so `git status` inside it cannot report on the real checkout
+# -- and the dynamic phase runs this suite in there. So a test that builds a
+# sandbox over `_root()` cannot run inside one, and a test that calls
+# `verify_code_dynamic` expecting it to do work cannot run where the recursion
+# guard short-circuits it. Both are skips, not failures: the environment cannot
+# express the question. Everything that constructs its own repository in tmp_path
+# runs everywhere, which is what keeps the derivation itself proved in both.
+requires_source_control = pytest.mark.skipif(
+    not _root_has_source_control(),
+    reason=(
+        "the sandbox copy is derived from `git ls-files`; this tree has no .git "
+        "(the verifier's own sandbox is the ordinary case)"
+    ),
+)
+
+requires_a_reachable_dynamic_phase = pytest.mark.skipif(
+    vt._inside_named_sandbox(),
+    reason="the recursion guard returns before the dynamic phase does any work",
+)
 
 
 @pytest.fixture(scope="module")
@@ -293,6 +324,7 @@ def test_a_marker_naming_an_unrelated_real_directory_is_ignored(monkeypatch, tmp
     assert vt._inside_named_sandbox() is False
 
 
+@requires_source_control
 def test_the_sandbox_marker_carries_a_root_that_satisfies_the_reader():
     """
     Binds the writer to the reader. `_Sandbox.env()` and
@@ -308,6 +340,7 @@ def test_the_sandbox_marker_carries_a_root_that_satisfies_the_reader():
     assert marker not in ("1", "true")
 
 
+@requires_source_control
 def test_an_ambient_marker_leaves_the_dynamic_phase_reachable(monkeypatch):
     """
     The read site must branch on containment, not on the raw variable. Proven
@@ -321,6 +354,9 @@ def test_an_ambient_marker_leaves_the_dynamic_phase_reachable(monkeypatch):
         pass
 
     class _ExplodingSandbox:
+        def __init__(self, *args, **kwargs):
+            pass
+
         def __enter__(self):
             raise _Reached()
 
@@ -330,3 +366,130 @@ def test_an_ambient_marker_leaves_the_dynamic_phase_reachable(monkeypatch):
     with patch.object(vt, "_Sandbox", _ExplodingSandbox):
         with pytest.raises(_Reached):
             vt.verify_code_dynamic()
+
+
+# ---------------------------------------------------------------------------
+# The sandbox manifest
+#
+# The copy the dynamic phase runs in was a hand-kept list of directories plus a
+# hand-kept list of root files, and it was short four times: tests/, docs/,
+# .github/, and finally publish_release.py, whose absence surfaced as a
+# collection error in a phase nothing in CI ran. Every one of those was found by
+# a person running the verifier by hand and reading the traceback.
+#
+# The list is now derived from `git ls-files`, so these tests are about the
+# derivation rather than about any particular file: one proves a tracked file
+# no list would name arrives in the copy, and the others prove that a manifest
+# which cannot be derived refuses instead of copying less. The second direction
+# is the one that matters -- a fallback to a partial list would restore the
+# defect exactly, and it would present as a pass.
+# ---------------------------------------------------------------------------
+
+
+def _staged_repo(tmp_path):
+    """A real repository holding a tracked file, and an untracked one beside it.
+
+    Staged rather than committed: `git ls-files` reads the index, so this needs
+    no user identity configured and cannot fail on a machine without one.
+    """
+    root = tmp_path / "repo"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "module.py").write_text("value = 1\n", encoding="utf-8")
+    (root / "unlisted_root_file.py").write_text("value = 2\n", encoding="utf-8")
+    (root / "untracked.py").write_text("value = 3\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "add", "pkg/module.py", "unlisted_root_file.py"],
+        cwd=root, check=True, capture_output=True,
+    )
+    return root
+
+
+def test_the_sandbox_copies_what_git_tracks_not_what_a_list_names(tmp_path):
+    """The derivation, on a tree no inventory in this file has ever seen.
+
+    `unlisted_root_file.py` is the whole point: it is in the copy because it is
+    tracked, and no list mentions it. The untracked file's absence is the same
+    claim from the other side -- the copy is the repository, not the directory.
+    """
+    root = _staged_repo(tmp_path)
+    with patch.object(vt, "_root", lambda: root):
+        with vt._Sandbox() as sandbox:
+            assert (sandbox / "pkg" / "module.py").is_file()
+            assert (sandbox / "unlisted_root_file.py").is_file()
+            assert not (sandbox / "untracked.py").exists()
+
+
+@requires_source_control
+def test_the_copy_holds_every_tracked_root_python_module():
+    """The instance that started this, generalised to its class.
+
+    Asserting `publish_release.py` by name would pass again the day a sixth root
+    module is added and forgotten. Asserting the set means the next one is
+    carried by the same fact that carries this one.
+    """
+    tracked = vt._tracked_paths(vt._root())
+    root_modules = [
+        name for name in tracked if name.endswith(".py") and "/" not in name
+    ]
+    assert "publish_release.py" in root_modules, (
+        "the tracked file whose omission from the old list hid behind a green suite"
+    )
+
+    with vt._Sandbox() as sandbox:
+        absent = [name for name in root_modules if not (sandbox / name).is_file()]
+    assert absent == []
+
+
+@requires_a_reachable_dynamic_phase
+def test_a_tree_without_source_control_refuses_instead_of_copying_less(tmp_path):
+    """Fail closed: no manifest, no run, and the report says which.
+
+    The tempting alternative is falling back to the old lists when git is
+    unavailable. That would run the suite over a copy nobody can characterise
+    and report the result as a pass, which is the defect this replaces.
+
+    The directory is stocked with exactly the files such a fallback would name,
+    which is the difference between this test and the one it replaced. An empty
+    directory catches a fallback only by accident -- the copy then fails for
+    lacking files rather than for being underived, and a fallback that happens
+    to name files that exist would sail through. Here a fallback gets a copy it
+    can build, and is caught by `test_suite` appearing at all.
+    """
+    plain = tmp_path / "no-git"
+    (plain / "auro_runtime").mkdir(parents=True)
+    (plain / "auro_runtime" / "__init__.py").write_text("", encoding="utf-8")
+    (plain / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+    (plain / "README.md").write_text("# x\n", encoding="utf-8")
+    with patch.object(vt, "_root", lambda: plain):
+        result = vt.verify_code_dynamic()
+
+    assert result["passed"] is False
+    assert any(
+        finding["code"] == "SANDBOX_MANIFEST_UNAVAILABLE"
+        for finding in result["findings"]
+    )
+    assert "test_suite" not in [check["name"] for check in result["checks"]], (
+        "nothing may be reported as executed when the copy was never made"
+    )
+
+
+@requires_a_reachable_dynamic_phase
+def test_a_tracked_file_missing_from_disk_refuses(tmp_path):
+    """The substrate must be faithful, and a partial copy is not the checkout.
+
+    A tracked file deleted but not committed makes the copy differ from both
+    HEAD and the working tree. Copying the rest and running the suite over it
+    would report on a tree that exists nowhere.
+    """
+    root = _staged_repo(tmp_path)
+    (root / "pkg" / "module.py").unlink()
+    with patch.object(vt, "_root", lambda: root):
+        result = vt.verify_code_dynamic()
+
+    assert result["passed"] is False
+    assert any(
+        finding["code"] == "SANDBOX_MANIFEST_UNAVAILABLE"
+        for finding in result["findings"]
+    )
+    assert "module.py" in _check(result, "sandbox_manifest")["detail"]

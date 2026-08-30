@@ -30,6 +30,26 @@ instance is ``--repository``, which has no default at all.  A default of
 to think; a default of ``testpypi`` would make a real release quietly land
 somewhere nobody looks.  Neither valence is safe, so the argument is required
 and the empty scope is refusal.
+
+``--expected-commit`` is required for the same reason, and was optional until
+2026-08-30.  A record proves *which* commit produced a candidate; only the
+operator can say which commit this release is meant to be.  While the comparison
+was opt-in, the two were never required to agree, so an older valid candidate --
+a stale ``dist/`` or a CI artifact from last week -- cleared every gate in this
+file and would have uploaded.  Omission permitted rather than refused, which is
+the exact valence law 3b asks every empty scope to declare.  The record's commit
+is now compared against operator intent on every run, and the comparison cannot
+be skipped by leaving an argument out.
+
+The other thing a record cannot be trusted to do is name a path.  It names
+*files in the evidence directory*, so every filename it carries must be an
+immediate member of that directory: no separators in either platform's spelling,
+no drive letters, no ``..``, and no symlinks in either direction.  A record
+filename that resolves elsewhere would otherwise pass the size and digest checks
+against a file the directory listing never saw, which makes the "no unnamed
+artifact" direction unenforceable and the directory claim false.  Refusing the
+shape is cheaper and more honest than resolving it: the trusted producer emits
+``path.name`` and nothing legitimate needs the other cases.
 """
 
 from __future__ import annotations
@@ -37,14 +57,21 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Sequence
 
 
 _EVIDENCE_FILENAME = "release-evidence.json"
 _ARTIFACT_SUFFIXES = (".whl", ".tar.gz")
+
+# The same shape ``release_evidence.py`` requires of its own --expected-commit.
+# An abbreviation is refused rather than resolved: this command has no repository
+# to resolve it against, and a prefix comparison would silently accept a shorter
+# and shorter claim until it accepted anything.
+_FULL_COMMIT = re.compile(r"[0-9a-fA-F]{40}")
 
 # Named rather than free-form. A URL typed at the command line is a destination
 # nobody reviewed, and the two that matter are both known in advance.
@@ -90,7 +117,7 @@ def load_evidence(evidence_dir: Path) -> dict:
 
 def verify_record_permits_publication(
     record: dict,
-    expected_commit: str | None = None,
+    expected_commit: str,
 ) -> None:
     """Check what the record says about itself before checking the files.
 
@@ -98,6 +125,13 @@ def verify_record_permits_publication(
     be refused on that ground, with that reason, rather than on a digest
     mismatch discovered afterwards.  The clearer refusal is the one that names
     the actual disqualification.
+
+    ``expected_commit`` has no default.  It is the operator's statement of which
+    commit this release is, and there is no safe value to supply on their behalf:
+    the record's own commit would make the comparison tautological, and any other
+    would be invented.  Passing ``None`` is refused here as well as at the
+    parser, so a caller inside this repository cannot re-open the hole the
+    command line no longer has.
     """
     if record.get("release_complete") is not True:
         raise PublishError(
@@ -122,11 +156,63 @@ def verify_record_permits_publication(
     if not isinstance(commit, str) or not commit:
         raise PublishError("record names no commit")
 
-    if expected_commit is not None and commit.lower() != expected_commit.lower():
+    if not isinstance(expected_commit, str) or _FULL_COMMIT.fullmatch(expected_commit) is None:
+        raise PublishError(
+            "--expected-commit must be the full 40-character Git object id of "
+            "the commit this release is meant to be; it is required, and an "
+            f"abbreviation is not accepted (got {expected_commit!r})"
+        )
+
+    if commit.lower() != expected_commit.lower():
         raise PublishError(
             f"record is for commit {commit}, but --expected-commit says "
             f"{expected_commit.lower()}"
         )
+
+
+def _contained_member(evidence_dir: Path, filename: str) -> Path:
+    """Join a record-supplied filename onto the evidence directory, or refuse.
+
+    The check is on the *shape* of the name, before the filesystem is consulted,
+    because the filesystem is what the escaping cases are trying to reach.  Both
+    path flavours are asked, not the running platform's: a record written on
+    Linux is consumed on Windows and the reverse, and each flavour recognises a
+    separator the other reads as an ordinary character.  ``PureWindowsPath``
+    catches ``a\\b`` and the drive-relative ``C:x``; ``PurePosixPath`` catches
+    ``a/b``.  ``.``, ``..`` and ``/abs/x`` all fail the same equality, since
+    none of them is its own basename.
+
+    The resolved-parent check afterwards is not redundant with it.  The shape
+    check says the name cannot describe a path out of the directory; the parent
+    check says the object it actually landed on is in the directory, which is a
+    different claim once symlinks exist -- law 10, where validation and action
+    must agree on what the input means.
+    """
+    if not filename:
+        raise PublishError("record names an artifact with an empty filename")
+    if (
+        PurePosixPath(filename).name != filename
+        or PureWindowsPath(filename).name != filename
+    ):
+        raise PublishError(
+            f"record names {filename!r}, which is not an immediate member of "
+            f"{evidence_dir}. A record names files in its own evidence "
+            "directory, never paths to anywhere else"
+        )
+
+    path = evidence_dir / filename
+    if path.is_symlink():
+        raise PublishError(
+            f"{filename} is a symbolic link. The record vouches for bytes in "
+            f"{evidence_dir}, and a link's bytes are chosen by its target, "
+            "which can change between this check and the upload"
+        )
+    if path.exists() and path.resolve().parent != evidence_dir:
+        raise PublishError(
+            f"{filename} resolves to {path.resolve()}, which is outside "
+            f"{evidence_dir}"
+        )
+    return path
 
 
 def verify_artifacts_match_record(
@@ -142,6 +228,7 @@ def verify_artifacts_match_record(
     serves says the uploaded files are byte-identical to the tested candidates,
     and an extra file is a file nobody tested.
     """
+    evidence_dir = evidence_dir.resolve()
     artifacts = record.get("artifacts")
     if not isinstance(artifacts, list) or not artifacts:
         raise PublishError("record names no artifacts")
@@ -152,11 +239,23 @@ def verify_artifacts_match_record(
             raise PublishError(f"malformed artifact entry in record: {entry!r}")
         named[entry["filename"]] = entry
 
-    present = {
-        path.name
-        for path in evidence_dir.iterdir()
-        if path.is_file() and path.name.endswith(_ARTIFACT_SUFFIXES)
-    }
+    # A link is refused here too, and not merely skipped. `is_file()` follows
+    # the link, so an unfiltered listing would compare the target's identity
+    # while the upload would hand twine the link -- and a dangling one would
+    # vanish from the listing entirely, which is the quiet direction: a file
+    # nobody can read is not a file nobody put there.
+    present: set[str] = set()
+    for path in evidence_dir.iterdir():
+        if not path.name.endswith(_ARTIFACT_SUFFIXES):
+            continue
+        if path.is_symlink():
+            raise PublishError(
+                f"{evidence_dir} holds a symbolic link named {path.name}. "
+                "Nothing in an evidence directory may be a link: the bytes "
+                "that were tested are the ones that must be uploaded"
+            )
+        if path.is_file():
+            present.add(path.name)
     unnamed = present - named.keys()
     if unnamed:
         raise PublishError(
@@ -166,7 +265,7 @@ def verify_artifacts_match_record(
 
     verified: list[Path] = []
     for filename, entry in sorted(named.items()):
-        path = evidence_dir / filename
+        path = _contained_member(evidence_dir, filename)
         if not path.is_file():
             raise PublishError(f"record names {filename}, which is not in {evidence_dir}")
 
@@ -199,7 +298,7 @@ def verify_artifacts_match_record(
 def publish(
     evidence_dir: Path,
     repository: str,
-    expected_commit: str | None = None,
+    expected_commit: str,
     dry_run: bool = False,
 ) -> list[Path]:
     """Run every gate, then hand the exact files to twine.
@@ -227,6 +326,7 @@ def publish(
     print(
         f"verified {len(files)} artifact(s) against {_EVIDENCE_FILENAME}\n"
         f"  commit: {source['commit']}\n"
+        f"  intent: {expected_commit.lower()} (--expected-commit)\n"
         f"  ref:    {source.get('ref')!r}\n"
         f"  target: {repository} ({_REPOSITORIES[repository]})"
     )
@@ -283,10 +383,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--expected-commit",
-        default=None,
+        required=True,
         help=(
-            "refuse unless the record names this commit, so a stale directory "
-            "cannot be published in place of the intended one"
+            "full 40-character id of the commit this release is meant to be. "
+            "Required: the record proves which commit produced these files, "
+            "and only you can say which commit was intended, so a stale but "
+            "valid candidate cannot be published in place of it"
         ),
     )
     parser.add_argument(

@@ -855,7 +855,7 @@ def test_secret_scan_covers_release_manifest_and_ci_workflows(
     """The whole-tree claim includes publication files outside Python packages."""
     from runtime_tools import verify_tools
 
-    for dirname in verify_tools._SOURCE_DIRS:
+    for dirname in verify_tools._SCAN_DIRS:
         (tmp_path / dirname).mkdir(parents=True)
     workflow_dir = tmp_path / ".github" / "workflows"
     workflow_dir.mkdir(parents=True)
