@@ -1,6 +1,6 @@
 # Test catalogue
 
-**509 test functions** across 21 files.
+**510 test functions** across 21 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -21,7 +21,7 @@ higher.
 | [`tests/test_file_tool_contracts.py`](../tests/test_file_tool_contracts.py) | 75 |
 | [`tests/test_credentials.py`](../tests/test_credentials.py) | 49 |
 | [`tests/test_registry.py`](../tests/test_registry.py) | 29 |
-| [`tests/test_directives.py`](../tests/test_directives.py) | 27 |
+| [`tests/test_directives.py`](../tests/test_directives.py) | 28 |
 | [`tests/test_end_to_end.py`](../tests/test_end_to_end.py) | 17 |
 | [`tests/test_security_p0.py`](../tests/test_security_p0.py) | 44 |
 | [`tests/test_support_claims.py`](../tests/test_support_claims.py) | 10 |
@@ -34,7 +34,7 @@ higher.
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 9 |
 | [`tests/test_release_evidence.py`](../tests/test_release_evidence.py) | 19 |
 | [`tests/test_publish_release.py`](../tests/test_publish_release.py) | 16 |
-| **Total** | **509** |
+| **Total** | **510** |
 
 ---
 
@@ -500,7 +500,7 @@ Tool registry shape, project-root and import wiring, the CLI surface, model-back
 
 Shipped directive integrity. A directive naming a tool that no longer exists parses fine, ships fine, and fails only at execution.
 
-27 tests.
+28 tests.
 
 ### TestEmptyToolScopeFailsClosed
 
@@ -521,7 +521,8 @@ Shipped directive integrity. A directive naming a tool that no longer exists par
 
 - **the directives mount resolves to the packaged authority**
 - **an absolute path to packaged authority is accepted**
-- **an escape through or around the mount is refused** — Traversal is refused after resolution, not by inspecting the string.
+- **a traversal through or around the mount is refused** — Traversal is refused after resolution, not by inspecting the string.
+- **an absolute path outside the workspace is refused** — `tmp_path` is absolute and outside the checkout on either platform.
 - **a sensitive name is still refused under the mount** — The mount must not become a way around the sensitive-file classifier.
 - **verifiers are not reachable from a directive** — The verifiers are operator functions and must stay unregistered.
 - **dynamic verifier fails when test phase is vacuous** — A missing runner or empty collection must never make the gate green.

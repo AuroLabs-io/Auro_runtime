@@ -202,17 +202,33 @@ class TestValidateDirectiveResolvesTheAuthorityMount:
     @pytest.mark.parametrize(
         "path",
         [
-            "directives/../../../../Windows/System32/drivers/etc/hosts",
-            "../../Windows/System32/drivers/etc/hosts",
-            "C:/Windows/System32/drivers/etc/hosts",
-            "/etc/passwd",
+            "directives/../../../../outside-the-workspace.md",
+            "../../outside-the-workspace.md",
         ],
     )
-    def test_an_escape_through_or_around_the_mount_is_refused(self, path, registry):
-        """Traversal is refused after resolution, not by inspecting the string."""
+    def test_a_traversal_through_or_around_the_mount_is_refused(self, path, registry):
+        """Traversal is refused after resolution, not by inspecting the string.
+
+        Both spellings are relative, so they mean the same thing on every
+        platform. A drive-qualified path does not: `C:/...` is absolute on
+        Windows and an ordinary relative path on POSIX, where it lands inside
+        the workspace and is refused for not existing rather than for escaping.
+        The absolute case is exercised below with a path the OS builds.
+        """
         from runtime_tools.validate_directive_tools import validate_directive
 
         result = validate_directive(path)
+        assert result.get("valid") is False
+        assert "outside the allowed project directory" in result["errors"][0]
+
+    def test_an_absolute_path_outside_the_workspace_is_refused(self, tmp_path, registry):
+        """`tmp_path` is absolute and outside the checkout on either platform."""
+        from runtime_tools.validate_directive_tools import validate_directive
+
+        outside = tmp_path / "outside-the-workspace.md"
+        outside.write_text("placeholder", encoding="utf-8")
+
+        result = validate_directive(str(outside))
         assert result.get("valid") is False
         assert "outside the allowed project directory" in result["errors"][0]
 
