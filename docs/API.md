@@ -440,7 +440,6 @@ The distinction that matters: **authority is not environment-selectable, the wor
 | `get_directives_dir()` | `authority_root / "directives"` | None |
 | `get_policies_dir()` | `authority_root / "policies"` | None |
 | `get_workspace_root()` | Writable workspace: files, archive, audit log | `AURO_WORKSPACE_ROOT`, then the legacy `AURO_ROOT` |
-| `get_project_root()` | Alias for `get_workspace_root()` | same |
 | `get_source_checkout_root()` | The source tree, for developer tooling only | `AURO_SOURCE_ROOT` |
 
 **Caveats**

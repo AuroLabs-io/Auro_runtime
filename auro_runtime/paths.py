@@ -93,6 +93,17 @@ def get_source_checkout_root() -> Path:
     return _validated_source_root(_SOURCE_ROOT, source="installed auro_runtime")
 
 
-def get_project_root() -> Path:
-    """Compatibility alias for callers that mean the writable workspace root."""
-    return get_workspace_root()
+# get_project_root() was removed 2026-08-29. It was a compatibility alias for
+# get_workspace_root(), and the name is the problem D-039 exists to retire: a
+# single "project root" that a caller can read as the workspace, the authority
+# tree, or the source checkout depending on what they came for. Its last
+# production caller was validate_directive, which used it to resolve
+# `directives/x.md` against the workspace -- correct only while a top-level
+# mirror of the authority tree happened to sit there. That call now goes
+# through the shared read resolver, leaving the alias with no callers at all.
+#
+# Ask for the root you actually mean: get_workspace_root() for writable state,
+# get_authority_root() (or the directives/policies helpers) for what executes,
+# get_source_checkout_root() for developer tooling. See
+# OT-project-root-resolution-succeeds-by-accident, whose remaining half is the
+# private app's own get_project_root().

@@ -1,6 +1,6 @@
 # Test catalogue
 
-**510 test functions** across 21 files.
+**511 test functions** across 21 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -20,7 +20,7 @@ higher.
 | [`tests/test_sensitive_resource_classification.py`](../tests/test_sensitive_resource_classification.py) | 36 |
 | [`tests/test_file_tool_contracts.py`](../tests/test_file_tool_contracts.py) | 75 |
 | [`tests/test_credentials.py`](../tests/test_credentials.py) | 49 |
-| [`tests/test_registry.py`](../tests/test_registry.py) | 29 |
+| [`tests/test_registry.py`](../tests/test_registry.py) | 30 |
 | [`tests/test_directives.py`](../tests/test_directives.py) | 28 |
 | [`tests/test_end_to_end.py`](../tests/test_end_to_end.py) | 17 |
 | [`tests/test_security_p0.py`](../tests/test_security_p0.py) | 44 |
@@ -34,7 +34,7 @@ higher.
 | [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 9 |
 | [`tests/test_release_evidence.py`](../tests/test_release_evidence.py) | 19 |
 | [`tests/test_publish_release.py`](../tests/test_publish_release.py) | 16 |
-| **Total** | **510** |
+| **Total** | **511** |
 
 ---
 
@@ -446,7 +446,7 @@ Alias resolution and delivery. The property under test throughout is that a reso
 
 Tool registry shape, project-root and import wiring, the CLI surface, model-backend selection, and two source-hygiene invariants: loggers stay under the auro_runtime namespace, and no absolute home path reaches shipped source.
 
-29 tests.
+30 tests.
 
 ### TestToolRegistryShape
 
@@ -468,10 +468,11 @@ Tool registry shape, project-root and import wiring, the CLI surface, model-back
 - **include args true adds an args summary per tool**
 - **include args false omits the args summary**
 - **runs cleanly through the real executor** — Exercises the schema-validation + dispatch path in executor.execute, not just the bare function.
-### TestProjectRootAndCoreImports
+### TestWorkspaceRootAndCoreImports
 
-- **get project root returns the repo root**
+- **get workspace root returns the repo root** — The `get_project_root()` alias was cut; the property was always this one.
 - **project root contains expected marker dirs** — `directives/` and `policies/` are not among the markers any more.
+- **the project root alias stays cut** — A removed name is only removed until someone re-adds it for convenience.
 - **get registry returns a copy not the live dict** — get_registry()'s docstring promises a copy; mutating the result must not corrupt the real registry.
 - **core module imports cleanly**
 - **main entrypoint is callable**

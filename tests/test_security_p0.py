@@ -348,7 +348,7 @@ def test_project_root_does_not_trust_an_arbitrary_working_directory(
     monkeypatch, tmp_path, repo_root
 ):
     """A CWD marker must not redirect policies, directives, or Python imports."""
-    from auro_runtime.paths import get_project_root
+    from auro_runtime.paths import get_workspace_root
 
     hostile = tmp_path / "hostile"
     (hostile / "runtime_tools").mkdir(parents=True)
@@ -361,15 +361,15 @@ def test_project_root_does_not_trust_an_arbitrary_working_directory(
     monkeypatch.chdir(hostile)
     monkeypatch.delenv("AURO_ROOT", raising=False)
 
-    assert get_project_root().resolve() == repo_root.resolve()
+    assert get_workspace_root().resolve() == repo_root.resolve()
 
 
 def test_invalid_explicit_root_fails_instead_of_falling_back(monkeypatch, tmp_path):
-    from auro_runtime.paths import get_project_root
+    from auro_runtime.paths import get_workspace_root
 
     monkeypatch.setenv("AURO_ROOT", str(tmp_path / "incomplete-root"))
     with pytest.raises(RuntimeError, match="AURO_ROOT"):
-        get_project_root()
+        get_workspace_root()
 
 
 def test_packaged_authority_is_the_only_authority_tree(repo_root):

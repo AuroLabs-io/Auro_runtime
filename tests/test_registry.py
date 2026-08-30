@@ -248,16 +248,18 @@ class TestListToolsTool:
 
 
 # =============================================================================
-# Project root, marker directories, and core module imports
+# Workspace root, marker directories, and core module imports
 # =============================================================================
 
 
-class TestProjectRootAndCoreImports:
-    def test_get_project_root_returns_the_repo_root(self, repo_root, monkeypatch):
-        monkeypatch.delenv("AURO_ROOT", raising=False)
-        from auro_runtime.paths import get_project_root
+class TestWorkspaceRootAndCoreImports:
+    def test_get_workspace_root_returns_the_repo_root(self, repo_root, monkeypatch):
+        """The `get_project_root()` alias was cut; the property was always this one."""
+        from auro_runtime.paths import get_workspace_root
 
-        assert get_project_root().resolve() == repo_root.resolve()
+        monkeypatch.delenv("AURO_ROOT", raising=False)
+        get_workspace_root.cache_clear()
+        assert get_workspace_root().resolve() == repo_root.resolve()
 
     def test_project_root_contains_expected_marker_dirs(self, repo_root):
         """`directives/` and `policies/` are not among the markers any more.
@@ -273,6 +275,21 @@ class TestProjectRootAndCoreImports:
 
         for authority in (get_directives_dir(), get_policies_dir()):
             assert authority.is_dir(), f"packaged authority missing: {authority}"
+
+    def test_the_project_root_alias_stays_cut(self):
+        """A removed name is only removed until someone re-adds it for convenience.
+
+        `get_project_root()` was an alias for the workspace root, and the name
+        is exactly the ambiguity D-039 retired: a caller reading it as "where
+        the directives are" got the workspace, which was right only while a
+        mirror sat there. Re-exporting it would restore that reading silently,
+        so the absence is asserted rather than trusted to memory.
+        """
+        import auro_runtime.paths as paths
+
+        assert not hasattr(paths, "get_project_root"), (
+            "get_project_root was cut on 2026-08-29; ask for the root you mean"
+        )
 
     def test_get_registry_returns_a_copy_not_the_live_dict(self, registry):
         """get_registry()'s docstring promises a copy; mutating the result must not corrupt the real registry."""

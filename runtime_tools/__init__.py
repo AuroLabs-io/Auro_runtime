@@ -22,12 +22,12 @@ import runtime_tools.list_directives_tools  # noqa: F401 — registers list_dire
 # `model` argument was a free-form unvalidated string, and its repeat-call gate
 # leaked state across runs and threads. Cut rather than gated: the contract
 # needs settling before it ships, and a control built on a contract under
-# question is work that gets redone. Not unused — create_directive still
-# instructs it in Phases 4, 7 and 8 and is knowingly shipped broken on that
-# account; its `tools:` declaration was dropped only because
-# test_every_declared_tool_is_registered correctly refuses it. See
-# OT-generate_text-needs-a-contract-before-it-ships and
-# OT-create-directive-needs-rework-before-it-ships.
+# question is work that gets redone. It left create_directive knowingly broken
+# for three days — Phases 4, 7 and 8 each called it, so each returned
+# unknown_tool and the run carried on without them. Reworked 2026-08-29: 4 and 8
+# compose directly, and 7 states what an author rehearsing their own directive
+# can and cannot establish. See
+# OT-generate_text-needs-a-contract-before-it-ships.
 #
 # runtime_tools.verify_tools is deliberately not imported here: it registers no
 # tools. Its verifiers are operator functions, imported directly by whoever runs
