@@ -1,6 +1,6 @@
 # Test catalogue
 
-**545 test functions** across 21 files.
+**547 test functions** across 21 files.
 
 Generated from the test sources by `python -m tests.catalogue`. Do not edit by hand.
 
@@ -31,10 +31,10 @@ higher.
 | [`tests/test_mcp_auth.py`](../tests/test_mcp_auth.py) | 9 |
 | [`tests/test_audit_disclosure.py`](../tests/test_audit_disclosure.py) | 27 |
 | [`tests/test_archive_integrity.py`](../tests/test_archive_integrity.py) | 6 |
-| [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 9 |
+| [`tests/test_distribution_install.py`](../tests/test_distribution_install.py) | 11 |
 | [`tests/test_release_evidence.py`](../tests/test_release_evidence.py) | 19 |
 | [`tests/test_publish_release.py`](../tests/test_publish_release.py) | 31 |
-| **Total** | **545** |
+| **Total** | **547** |
 
 ---
 
@@ -802,17 +802,19 @@ Soft delete keeps its promise: an archived file is never destroyed by a later on
 
 Builds a real wheel and sdist, installs each into an isolated environment, and runs the installed package with no source checkout present. Proves the packaged authority split, the source-fallback refusal, and provenance checks hold from the artifact a user actually installs, not just from source.
 
-9 tests.
+11 tests.
 
 - **wheel contains reviewed authority assets and record**
 - **sdist excludes tests and builds the same authority set**
+- **the sdist leg installs the sdist and not the supplied wheel** — Negative control for the artifact selection itself.
+- **a healthy sdist reaches the install intact and only the sdist leg** — Permit direction of the same control, and the half law 1c asks for.
 - **installed library and cli use packaged authority and workspace audit**
 - **installed mcp stdio discovers packaged directive and refuses sensitive path**
 - **missing installed policy fails without source fallback**
 - **missing installed directive fails without source fallback**
 - **nonisolated source contamination trips provenance check** — Negative control: the same check rejects a child contaminated by PYTHONPATH.
 - **the console script dispatches exactly like the module cli** — The README's `auro-runtime ...` promise, run rather than read.
-- **the installed wheel refuses every documented unsafe transport** — Three documented refusals, against the wheel rather than the checkout.
+- **the installed artifact refuses every documented unsafe transport** — Three documented refusals, against each artifact rather than the checkout.
 
 ---
 

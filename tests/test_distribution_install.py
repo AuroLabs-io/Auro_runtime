@@ -1,11 +1,20 @@
 """
-Distribution-boundary verification for the built wheel.
+Distribution-boundary verification for both published artifacts.
 
 These tests deliberately do not import the project under test in their child
-processes from this checkout.  They build one exact wheel from a writable
-temporary source copy, install it and all of its dependencies into a clean
-virtual environment, and run the installed interpreter with ``-I`` from a
-hostile unrelated working directory.
+processes from this checkout.  They build one exact wheel and one exact source
+distribution from a writable temporary source copy, install each of them and
+all of their dependencies into a clean virtual environment, and run the
+installed interpreter with ``-I`` from a hostile unrelated working directory.
+
+Every installed-surface probe is parametrised over both lineages -- the wheel
+itself, and a wheel rebuilt from the source distribution -- because a release
+that publishes two files and probes one has evidence for one.  The selection
+between them is proved in both directions rather than assumed -- a broken
+source distribution must fail the sdist leg and only the sdist leg, and a
+healthy one must reach it intact and only it.  See the two controls named
+``..._installs_the_sdist_and_not_the_supplied_wheel`` and
+``..._reaches_the_install_intact_and_only_the_sdist_leg``.
 
 The test is opt-in because populating the temporary wheelhouse may require
 package-index access.  Run it with::
@@ -43,6 +52,10 @@ pytestmark = [
 _PROJECT_WHEEL_PREFIX = "auro_runtime-"
 _AUDIT_FILENAME = "auro_audit.jsonl"
 _SENSITIVE_SENTINEL = "distribution-test-sensitive-sentinel"
+_SDIST_MUTATION_SENTINEL = (
+    "SDIST_INSTALL_PROBE: this source artifact is unusable when installed"
+)
+_SDIST_POSITIVE_MARKER = "SDIST_INSTALL_PROBE: this source artifact reached the install"
 
 _LIBRARY_PROBE = r"""
 import json
@@ -131,19 +144,44 @@ print(json.dumps({
 """
 
 
+_ARTIFACT_LINEAGES = ("wheel", "sdist")
+
+
 @dataclass(frozen=True)
 class BuiltDistribution:
     wheel: Path
-    sdist: Path | None
+    sdist: Path
+    sdist_wheel: Path
     wheelhouse: Path
     sha256: str
+    sdist_sha256: str
     source_copy: Path
     source_root: Path
+
+    def installable(self, lineage: str) -> Path:
+        """The file an install of ``lineage`` must actually consume.
+
+        The two lineages are different files by construction.  ``wheel`` is the
+        candidate wheel; ``sdist`` is a wheel rebuilt from the candidate source
+        distribution, sharing none of its bytes.  Both installs are routed
+        through this one lookup on purpose: collapsing the sdist leg back onto
+        the supplied wheel is then a one-line change, which is exactly what
+        ``test_the_sdist_leg_installs_the_sdist_and_not_the_supplied_wheel``
+        exists to fail on.  Law 1c -- a selection proved only by its passes is
+        not proved.
+        """
+        if lineage == "wheel":
+            return self.wheel
+        if lineage == "sdist":
+            return self.sdist_wheel
+        raise AssertionError(f"unknown artifact lineage: {lineage!r}")
 
 
 @dataclass(frozen=True)
 class InstalledDistribution:
     built: BuiltDistribution
+    lineage: str
+    installable: Path
     root: Path
     python: Path
     site_packages: Path
@@ -314,6 +352,162 @@ def _assert_sensitive_path_refusal(result: dict) -> None:
     assert _SENSITIVE_SENTINEL not in json.dumps(result)
 
 
+def _build_sdist(source: Path, outdir: Path) -> Path:
+    built = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-m",
+            "build",
+            "--sdist",
+            "--no-isolation",
+            "--outdir",
+            str(outdir),
+        ],
+        cwd=source,
+        text=True,
+        capture_output=True,
+        timeout=300,
+    )
+    assert built.returncode == 0, built.stdout + built.stderr
+    sdists = sorted(outdir.glob("auro_runtime-*.tar.gz"))
+    assert len(sdists) == 1, sdists
+    return sdists[0]
+
+
+def _wheel_from_sdist(sdist: Path, outdir: Path, *, cwd: Path) -> Path:
+    rebuilt = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-m",
+            "pip",
+            "wheel",
+            str(sdist),
+            "--wheel-dir",
+            str(outdir),
+            "--no-build-isolation",
+            "--no-deps",
+        ],
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        timeout=300,
+    )
+    assert rebuilt.returncode == 0, rebuilt.stdout + rebuilt.stderr
+    wheels = sorted(outdir.glob("auro_runtime-*.whl"))
+    assert len(wheels) == 1, wheels
+    return wheels[0]
+
+
+def _install_into_clean_venv(
+    venv_root: Path,
+    *,
+    installable: Path,
+    wheelhouse: Path,
+    cwd: Path,
+) -> subprocess.CompletedProcess[str]:
+    """Install exactly ``installable`` into a fresh venv, dependencies local.
+
+    Returns the completed ``pip install`` rather than asserting on it, because
+    one caller is a negative control that requires the install-or-import to
+    fail.  A helper that asserted success could not be reused to prove failure.
+    """
+    venv.EnvBuilder(with_pip=True, clear=True).create(venv_root)
+    return subprocess.run(
+        [
+            str(_python_in(venv_root)),
+            "-I",
+            "-B",
+            "-m",
+            "pip",
+            "install",
+            "--no-index",
+            "--find-links",
+            str(wheelhouse),
+            str(installable),
+        ],
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        timeout=300,
+    )
+
+
+def _probe_each_lineage_against_a_mutated_sdist(
+    built: BuiltDistribution,
+    tmp_path: Path,
+    *,
+    init_source: str,
+    probe: str,
+) -> dict[str, subprocess.CompletedProcess[str]]:
+    """Install both lineages when only the sdist has been altered, and probe each.
+
+    The wheel handed to the sdist-lineage install is rebuilt from a source
+    distribution whose ``auro_runtime/__init__.py`` is ``init_source``; the
+    wheel lineage gets the untouched candidate.  Only the source distribution
+    differs between the two, so any difference the probe observes is caused by
+    which artifact was installed and by nothing else.
+
+    Returns both completed probes rather than asserting, because the two
+    controls that call this require opposite outcomes -- one needs the sdist
+    leg to fail, the other needs it to succeed and carry a marker.
+    """
+    mutant_source = tmp_path / "mutant-source"
+    shutil.copytree(
+        built.source_copy,
+        mutant_source,
+        ignore=shutil.ignore_patterns(
+            ".pytest_cache", "__pycache__", "*.pyc", "*.egg-info", "build", "dist"
+        ),
+    )
+    (mutant_source / "auro_runtime" / "__init__.py").write_text(
+        init_source, encoding="utf-8"
+    )
+
+    sdist_dir = tmp_path / "mutant-sdist"
+    wheel_dir = tmp_path / "mutant-sdist-wheel"
+    sdist_dir.mkdir()
+    wheel_dir.mkdir()
+    mutant_sdist = _build_sdist(mutant_source, sdist_dir)
+    mutant = BuiltDistribution(
+        # The wheel is the real one, untouched. Only the sdist is altered, so a
+        # collapse onto the wheel is the single thing that can erase the
+        # difference the callers below are looking for.
+        wheel=built.wheel,
+        sdist=mutant_sdist,
+        sdist_wheel=_wheel_from_sdist(mutant_sdist, wheel_dir, cwd=tmp_path),
+        wheelhouse=built.wheelhouse,
+        sha256=built.sha256,
+        sdist_sha256=hashlib.sha256(mutant_sdist.read_bytes()).hexdigest(),
+        source_copy=mutant_source,
+        source_root=built.source_root,
+    )
+    assert mutant.installable("sdist") != mutant.installable("wheel")
+
+    observed: dict[str, subprocess.CompletedProcess[str]] = {}
+    for lineage in _ARTIFACT_LINEAGES:
+        venv_root = tmp_path / f"venv-{lineage}"
+        install = _install_into_clean_venv(
+            venv_root,
+            installable=mutant.installable(lineage),
+            wheelhouse=mutant.wheelhouse,
+            cwd=tmp_path,
+        )
+        assert install.returncode == 0, (
+            f"the {lineage} lineage failed to install at all, so this control "
+            f"cannot say which artifact was chosen\n{install.stdout}\n{install.stderr}"
+        )
+        observed[lineage] = subprocess.run(
+            [str(_python_in(venv_root)), "-I", "-B", "-c", probe],
+            cwd=tmp_path,
+            text=True,
+            capture_output=True,
+            timeout=120,
+        )
+    return observed
+
+
 def _assert_refusal_audit(workspace: Path) -> None:
     events = _read_audit(workspace)
     matching = [
@@ -408,47 +602,67 @@ def built_distribution(
         assert hashlib.sha256(wheel.read_bytes()).digest() == hashlib.sha256(
             supplied_wheel.read_bytes()
         ).digest()
+
+    if supplied_sdist is None:
+        sdist_dir = scratch / "sdist"
+        sdist_dir.mkdir()
+        sdist = _build_sdist(source_copy, sdist_dir)
+    else:
+        sdist = supplied_sdist
+
+    # Rebuild a wheel from the source distribution once, session-wide. This is
+    # the artifact an adopter gets from `pip install --no-binary`, or from any
+    # index resolution where no compatible wheel is offered, and until this
+    # existed no probe in this module had ever run against it -- the sdist was
+    # opened, inspected and rebuilt, and then every installed-surface assertion
+    # went back to the wheel fixture.
+    sdist_wheel_dir = scratch / "sdist-wheel"
+    sdist_wheel_dir.mkdir()
+    sdist_wheel = _wheel_from_sdist(sdist, sdist_wheel_dir, cwd=scratch)
+
     return BuiltDistribution(
         wheel=wheel,
-        sdist=supplied_sdist,
+        sdist=sdist,
+        sdist_wheel=sdist_wheel,
         wheelhouse=wheelhouse,
         sha256=hashlib.sha256(wheel.read_bytes()).hexdigest(),
+        sdist_sha256=hashlib.sha256(sdist.read_bytes()).hexdigest(),
         source_copy=source_copy,
         source_root=repo_root.resolve(),
     )
 
 
-@pytest.fixture
+@pytest.fixture(params=_ARTIFACT_LINEAGES)
 def installed_distribution(
+    request: pytest.FixtureRequest,
     tmp_path: Path,
     built_distribution: BuiltDistribution,
 ) -> InstalledDistribution:
+    """One clean install per artifact lineage, so every probe runs twice.
+
+    Clause 5 of the release gate says *both* artifacts install and pass their
+    applicable public-surface probes.  Until this fixture was parametrised the
+    suite proved that for the wheel and asserted it for the pair: the sdist was
+    inspected and rebuilt, never installed, and no probe below had ever
+    imported anything derived from it.  Law 16c -- a control's stated scope
+    must be falsifiable against its actual reach.
+    """
+    lineage = request.param
+    installable = built_distribution.installable(lineage)
     venv_root = tmp_path / "venv"
-    venv.EnvBuilder(with_pip=True, clear=True).create(venv_root)
     python = _python_in(venv_root)
 
-    proc = subprocess.run(
-        [
-            str(python),
-            "-I",
-            "-B",
-            "-m",
-            "pip",
-            "install",
-            "--no-index",
-            "--find-links",
-            str(built_distribution.wheelhouse),
-            str(built_distribution.wheel),
-        ],
+    proc = _install_into_clean_venv(
+        venv_root,
+        installable=installable,
+        wheelhouse=built_distribution.wheelhouse,
         cwd=tmp_path,
-        text=True,
-        capture_output=True,
-        timeout=300,
     )
     assert proc.returncode == 0, (
-        "failed to install the exact wheel into the clean venv\n"
-        f"wheel={built_distribution.wheel}\n"
-        f"sha256={built_distribution.sha256}\n"
+        f"failed to install the exact {lineage}-derived artifact into the clean venv\n"
+        f"artifact={installable}\n"
+        f"wheel_sha256={built_distribution.sha256}\n"
+        f"sdist_sha256={built_distribution.sdist_sha256}\n"
         f"stdout:\n{proc.stdout}\n"
         f"stderr:\n{proc.stderr}"
     )
@@ -507,6 +721,8 @@ def installed_distribution(
     assert authority.is_dir()
     return InstalledDistribution(
         built=built_distribution,
+        lineage=lineage,
+        installable=installable,
         root=venv_root,
         python=python,
         site_packages=site_packages,
@@ -561,36 +777,8 @@ def test_wheel_contains_reviewed_authority_assets_and_record(
 
 def test_sdist_excludes_tests_and_builds_the_same_authority_set(
     built_distribution: BuiltDistribution,
-    tmp_path: Path,
 ) -> None:
-    sdist_dir = tmp_path / "sdist"
-    rebuilt_dir = tmp_path / "rebuilt-wheel"
-    sdist_dir.mkdir()
-    rebuilt_dir.mkdir()
-
-    if built_distribution.sdist is None:
-        built = subprocess.run(
-            [
-                sys.executable,
-                "-B",
-                "-m",
-                "build",
-                "--sdist",
-                "--no-isolation",
-                "--outdir",
-                str(sdist_dir),
-            ],
-            cwd=built_distribution.source_copy,
-            text=True,
-            capture_output=True,
-            timeout=300,
-        )
-        assert built.returncode == 0, built.stdout + built.stderr
-        sdists = sorted(sdist_dir.glob("auro_runtime-*.tar.gz"))
-        assert len(sdists) == 1, sdists
-        sdist = sdists[0]
-    else:
-        sdist = built_distribution.sdist
+    sdist = built_distribution.sdist
 
     with tarfile.open(sdist, "r:gz") as archive:
         members = {
@@ -648,28 +836,10 @@ def test_sdist_excludes_tests_and_builds_the_same_authority_set(
         for member in members
     ), "test implementation must not ship in the source distribution"
 
-    rebuilt = subprocess.run(
-        [
-            sys.executable,
-            "-B",
-            "-m",
-            "pip",
-            "wheel",
-            str(sdist),
-            "--wheel-dir",
-            str(rebuilt_dir),
-            "--no-build-isolation",
-            "--no-deps",
-        ],
-        cwd=tmp_path,
-        text=True,
-        capture_output=True,
-        timeout=300,
-    )
-    assert rebuilt.returncode == 0, rebuilt.stdout + rebuilt.stderr
-    wheels = sorted(rebuilt_dir.glob("auro_runtime-*.whl"))
-    assert len(wheels) == 1, wheels
-
+    # The rebuild is the session fixture's, not a second one: the wheel whose
+    # authority set is compared here is the same file the sdist leg of
+    # installed_distribution installs, so this assertion describes the artifact
+    # actually probed rather than a rebuild that happens to resemble it.
     expected_authority = {
         f"auro_runtime/resources/{directory}/{path.name}"
         for directory, pattern in (("directives", "*.md"), ("policies", "*.yaml"))
@@ -677,7 +847,7 @@ def test_sdist_excludes_tests_and_builds_the_same_authority_set(
             built_distribution.source_copy / "auro_runtime" / "resources" / directory
         ).glob(pattern)
     }
-    with zipfile.ZipFile(wheels[0]) as archive:
+    with zipfile.ZipFile(built_distribution.sdist_wheel) as archive:
         rebuilt_authority = {
             name
             for name in archive.namelist()
@@ -685,6 +855,149 @@ def test_sdist_excludes_tests_and_builds_the_same_authority_set(
         }
     assert expected_authority
     assert rebuilt_authority == expected_authority
+
+
+def test_the_sdist_leg_installs_the_sdist_and_not_the_supplied_wheel(
+    built_distribution: BuiltDistribution,
+    tmp_path: Path,
+) -> None:
+    """Negative control for the artifact selection itself.
+
+    Every probe below is parametrised over two lineages, and the whole value of
+    that parametrisation rests on one unproved assumption: that the sdist leg
+    installs something derived from the source distribution rather than the
+    wheel sitting beside it.  Nothing in a passing run distinguishes those.  A
+    fixture that returned ``self.wheel`` for both lineages would produce two
+    green legs, a doubled test count, and exactly the evidence the suite had
+    before this file was changed -- which is how the previous version of this
+    module came to state a reach over both artifacts while probing one.
+
+    So the selection is mutated rather than asserted.  A source distribution is
+    built whose installed package raises on import, paired with the untouched
+    good wheel, and both lineages are installed:
+
+      * the sdist lineage must carry the injected failure -- if it does not,
+        the selection has collapsed onto the wheel and every sdist-leg pass
+        elsewhere in this module is vacuous;
+      * the wheel lineage must be unaffected -- if it is not, the mutation was
+        not localised to the sdist and proves nothing about which artifact was
+        chosen.
+
+    Law 1c asks for both directions, and this is the shape it takes here: one
+    mutation, two observations that must disagree.  Law 1b -- the harness is
+    subject to every law, and the fixture that picks the artifact is harness.
+
+    Proved by mutation on 2026-08-30, at both layers a collapse can occur:
+
+      * ``installable()`` returning ``self.wheel`` for the sdist lineage is
+        killed by the inequality guard below, before any venv is built;
+      * ``_install_into_clean_venv`` resolving ``auro_runtime`` by name from the
+        wheelhouse instead of installing the file it was handed -- the pip
+        resolution the guard cannot see -- is killed by the sdist import
+        assertion, which is the failure this docstring describes.
+
+    This is only the refusal half.  The permit half -- that a healthy source
+    distribution installs, imports, and arrives with its own content -- is
+    ``test_a_healthy_sdist_reaches_the_install_intact_and_only_the_sdist_leg``,
+    and neither control is sufficient alone: this one would be satisfied by a
+    leg that refused every sdist, and that one by a leg that never refused any.
+
+    Known bound, recorded rather than left implicit.  The ``returncode == 0``
+    wheel assertion below is a localisation guard and is *not* mutation-proved:
+    every mutation that breaks the wheel leg while leaving the two paths
+    distinct turned out to be a mutation of this test rather than of its
+    subject, and a test's own assertion is not the subject.  The wheel leg's
+    *content* is separately discriminated by the permit control, which fails if
+    the wheel ever carries what only the sdist was given; what stays unproved
+    is narrower than it looks, and is recorded here rather than assumed away.
+    """
+    observed = _probe_each_lineage_against_a_mutated_sdist(
+        built_distribution,
+        tmp_path,
+        init_source=f'raise RuntimeError("{_SDIST_MUTATION_SENTINEL}")\n',
+        probe="import auro_runtime",
+    )
+
+    assert observed["sdist"].returncode != 0, (
+        "the sdist lineage imported cleanly from a source distribution built to "
+        "raise on import, so installed_distribution is not installing the sdist "
+        "-- the two artifact paths have collapsed onto the supplied wheel"
+    )
+    assert _SDIST_MUTATION_SENTINEL in observed["sdist"].stderr, (
+        "the sdist lineage failed for some reason other than the injected one:\n"
+        f"{observed['sdist'].stdout}\n{observed['sdist'].stderr}"
+    )
+    assert observed["wheel"].returncode == 0, (
+        "the wheel lineage broke under an sdist-only mutation, so the failure "
+        f"above does not identify the chosen artifact:\n{observed['wheel'].stderr}"
+    )
+    assert _SDIST_MUTATION_SENTINEL not in observed["wheel"].stderr
+
+
+def test_a_healthy_sdist_reaches_the_install_intact_and_only_the_sdist_leg(
+    built_distribution: BuiltDistribution,
+    tmp_path: Path,
+) -> None:
+    """Permit direction of the same control, and the half law 1c asks for.
+
+    The negative control above proves the sdist leg can go red.  That is not
+    the same as proving its green is caused by anything: a leg that refused
+    every source distribution, or that observed only *that* a rebuild happened
+    rather than what it contained, would satisfy every assertion up there.
+    Both are refusal-shaped evidence, and a control proven only by its refusals
+    is not proven.
+
+    So the sdist is mutated again, benignly this time.  A marker attribute is
+    appended to the packaged ``__init__``, and the requirement inverts: both
+    lineages must install, both must import cleanly, and the marker must be
+    visible through the sdist leg and absent from the wheel leg.
+
+    That is a stronger statement than the negative control's, and it is the one
+    the twelve parametrised sdist-leg probes below actually rest on:
+
+      * the sdist leg permits a healthy source distribution rather than merely
+        being capable of failing;
+      * what it installs carries the *content* of that source distribution, not
+        just a path that differs from the wheel's -- a selection that returned
+        some other correctly-built wheel would pass the negative control and
+        fail here;
+      * the wheel leg is untouched by an sdist-only change, so the marker
+        discriminates the artifact rather than the environment.
+
+    The mutation is of the subject, not of this test: what changes is the
+    source distribution being installed.
+    """
+    packaged_init = (
+        built_distribution.source_copy / "auro_runtime" / "__init__.py"
+    ).read_text(encoding="utf-8")
+    observed = _probe_each_lineage_against_a_mutated_sdist(
+        built_distribution,
+        tmp_path,
+        init_source=(
+            f'{packaged_init}\n__sdist_probe__ = "{_SDIST_POSITIVE_MARKER}"\n'
+        ),
+        probe=(
+            "import auro_runtime\n"
+            "print(getattr(auro_runtime, '__sdist_probe__', '<absent>'))\n"
+        ),
+    )
+
+    for lineage in _ARTIFACT_LINEAGES:
+        assert observed[lineage].returncode == 0, (
+            f"the {lineage} lineage failed to import a healthy package, so this "
+            f"control cannot speak to the permit direction:\n"
+            f"{observed[lineage].stdout}\n{observed[lineage].stderr}"
+        )
+
+    assert observed["sdist"].stdout.strip() == _SDIST_POSITIVE_MARKER, (
+        "the sdist lineage imported cleanly but without the marker written into "
+        "the source distribution it was built from, so what it installed is not "
+        "that source distribution's content"
+    )
+    assert observed["wheel"].stdout.strip() == "<absent>", (
+        "the wheel lineage carried a marker that exists only in the mutated "
+        "source distribution, so the two lineages are not separated by artifact"
+    )
 
 
 def test_installed_library_and_cli_use_packaged_authority_and_workspace_audit(
@@ -1106,14 +1419,14 @@ _DOCUMENTED_TRANSPORT_REFUSALS = [
 
 
 @pytest.mark.parametrize("extra_env,argv_tail,expected", _DOCUMENTED_TRANSPORT_REFUSALS)
-def test_the_installed_wheel_refuses_every_documented_unsafe_transport(
+def test_the_installed_artifact_refuses_every_documented_unsafe_transport(
     installed_distribution: InstalledDistribution,
     tmp_path: Path,
     extra_env: dict[str, str],
     argv_tail: list[str],
     expected: str,
 ) -> None:
-    """Three documented refusals, against the wheel rather than the checkout.
+    """Three documented refusals, against each artifact rather than the checkout.
 
     These exits were verified against the source checkout on 2026-08-27.  Law 4
     again: that established the claim for a tree, not for the artifact an
