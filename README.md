@@ -2,6 +2,22 @@
 
 This is a security focused AI skills execution kernel. The entire premise of this project was to create a safe execution layer for an agentic system to run skills autonomously and provide consistently trustworthy results. If, during a given run, a model proposes an action or tool call that is not allowed, this runtime rejects it before it has a chance to execute. That verdict is then appended to auro_audit.jsonl, or to whatever path AURO_AUDIT_LOG names. Guards write events on refusal, but a guard that approves returns `None` and logs nothing in this version. (See Operational Audit for the record shape.) Primary access to this runtime kernel is via MCP in this version. It can be used with Stdio to directly wire into an AI harness.
 
+## TL;DR
+
+`auro-runtime` is an execution kernel that sits between an untrusted model and the tools it wants to call. The model never reaches a tool directly. It proposes a tool name, arguments, and a credential *alias*; the runtime decides whether that call may cross, and only a call that survives every gate runs.
+
+The design places zero trust in the model, and only in the model — the operator is trusted, and the runtime does not defend against its own configuration. A directive names the tools a run may use, and a call to anything outside that list is refused. Arguments are schema-validated before a side-effectful tool is entered. Policy guards then evaluate the call. If a security argument is *missing* rather than set, the call is refused instead of quietly skipping that boundary — an empty scope is a refusal here, not a default.
+
+A refused call is stopped before it can take effect — at the wall for anything outside the directive's scope, and again inside the tool for a protected path or a destination the egress guard declines. Either way the refusal is returned to the caller as a failed result rather than ending the run, and the verdict is appended to the audit log.
+
+![A user request enters the Auro-Runtime governed execution boundary and reaches an untrusted model. The directive grants tool authority to the runtime wall, which checks scope, schema and policy guards before deciding whether a proposed call may cross. Refused calls, and approved calls that then fail a protected-path or egress check, pass through sanitization on their way to the audit log and back to the model as refusals. Approved calls run, resolve credential values at runtime from an external source, reach the workspace or public network, and their results pass through sanitization before returning to the model or leaving as output.](docs/auro-runtime-boundary.svg)
+
+Sanitization is a single shared boundary drawn twice above: it applies to everything crossing — tool results, refusals, audit records, and the model's own output.
+
+**The claim.** An operation the run was not sanctioned to perform is refused before it can take effect. A model can therefore work unattended while its *effects* stay inside a boundary you declared in advance, and what it attempted is written down either way.
+
+**Where that boundary ends,** because the claim is about operations rather than about content. Instructions embedded in a tool result are **not** neutralized — results are scrubbed for credential shapes, not for a payload trying to redirect the run — so treat tool output as untrusted data. The audit log is best-effort and append-written, with no durability guarantee. The runtime's own model-backend traffic is deliberately not destination-checked, so a local backend on loopback stays reachable. Nothing here judges whether the model's work was *correct*; it bounds what the model was able to do. Each limit is detailed below, and [Threat model and trust boundary](#threat-model-and-trust-boundary) states who is trusted and on what grounds.
+
 ## Directives
 
 There are two defined layers to the kernel. The first layer is the directive. It lists the job, steps, and all of the registered tools the model is allowed to use during a given run. The body of the directive provides the context the model needs: purpose, steps, requirements, handoff notes etc. and the YAML frontmatter defines which tools are available for that particular directive along with a description, the directive ID, and which category of directive it belongs to. Directives with an empty tool list will still load in and run just fine but any attempt at calling a registered tool will be rejected.

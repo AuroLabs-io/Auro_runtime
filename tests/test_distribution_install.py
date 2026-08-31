@@ -608,6 +608,7 @@ def test_sdist_excludes_tests_and_builds_the_same_authority_set(
         "docs/DIRECTIVES.md",
         "docs/FAQ.md",
         "docs/TESTS.md",
+        "docs/auro-runtime-boundary.svg",
     } <= members
     # docs/TESTS.md is the generated catalogue of the suite. The README links to
     # it, and the link should resolve inside the sdist as well as on GitHub.
@@ -620,6 +621,13 @@ def test_sdist_excludes_tests_and_builds_the_same_authority_set(
     # docs/AUDIT_EVENTS.md is the third generated catalogue. API.md calls `event`
     # the grouping key, so the set of names is part of the integration contract
     # and has to travel with the doc that references it.
+    #
+    # docs/auro-runtime-boundary.svg is the first non-markdown file the README
+    # references. MANIFEST.in shipped only *.md out of docs/ until it was added,
+    # so the sdist would have carried a README with a broken image while every
+    # other check here passed -- visible to anyone installing from source rather
+    # than reading GitHub. Asserted here so the manifest line is a control
+    # rather than something that happens to be true.
     #
     # SECURITY.md and docs/FAQ.md were added to this set on 2026-08-16, for the
     # same reason as DIRECTIVES.md rather than as a formality. SECURITY.md is
